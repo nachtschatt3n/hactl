@@ -1,0 +1,44 @@
+[env]
+KUBECONFIG = "/home/mu/code/cberg-home-nextgen/kubeconfig"
+PYTHONPATH = "/home/mu/code/cberg-home-assistant"
+
+[tools]
+python = "3.13"
+"aqua:kubernetes/kubectl" = "1.34.0"
+
+[tasks.install]
+description = "Install Python dependencies"
+run = "pip install -r requirements.txt"
+
+
+[tasks.test]
+description = "Run pytest test suite"
+run = "pytest test/ -v"
+
+[tasks.test-fast]
+description = "Run pytest with short traceback"
+run = "pytest test/ --tb=short"
+
+[tasks.lint]
+description = "Check Python syntax"
+run = "python -m py_compile get/*.py update/*.py"
+
+[tasks.setup]
+description = "Complete project setup"
+run = [
+    "mise run install",
+    "echo 'Setup complete! Make sure to create .env file with HASS_URL and HASS_TOKEN'",
+    "echo 'PYTHONPATH is set automatically by mise when you cd into this directory'"
+]
+
+[tasks.run-script]
+description = "Run a Python script with automatic PYTHONPATH"
+run = "PYTHONPATH=$(pwd) python $@"
+
+[tasks.dev]
+description = "Setup development environment"
+run = [
+    "mise run install",
+    "echo 'Development environment ready'"
+]
+

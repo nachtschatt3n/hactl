@@ -1,0 +1,53 @@
+# Environment variables with secrets
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+ENV/
+.pytest_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# AI Memory - Private context about home setup
+memory/*
+!memory/.gitkeep
+!memory/README.md
+memory/**/*
+!memory/**/.gitkeep
+!memory/**/README.md
+
+# AI Generated Content - Private generated configs
+generated/*
+!generated/.gitkeep
+!generated/README.md
+generated/**/*
+!generated/**/.gitkeep
+!generated/**/README.md
+
+# Personal Home Configuration - Keep out of repo
+automations/
+dashboards/
+helpers/
+python_scripts/
+*battery*setup*.md
+*battery*summary*.md
+*dashboard*pushed*.md
+*push*dashboard*.md
+*.local.yaml
+*.personal.yaml
