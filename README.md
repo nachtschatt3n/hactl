@@ -2,9 +2,9 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
-[![Tests](https://img.shields.io/badge/tests-49%20passing-brightgreen.svg)](test/)
+[![Tests](https://img.shields.io/badge/tests-87%20total-brightgreen.svg)](test/)
 
-A powerful kubectl-style command-line interface for managing Home Assistant via API. Control your smart home from the terminal with 47 commands organized into intuitive command groups.
+A powerful kubectl-style command-line interface for managing Home Assistant via API. Control your smart home from the terminal with 41 commands organized into 5 intuitive command groups.
 
 ## ✨ Features
 
@@ -12,25 +12,55 @@ A powerful kubectl-style command-line interface for managing Home Assistant via 
 - **📊 Multiple Output Formats** - table, JSON, YAML, CSV, and detail views
 - **🔋 Battery Monitoring** - Track all battery-powered devices
 - **☸️ Kubernetes Integration** - Direct config updates for K8s deployments
-- **🤖 AI Memory System** - Store contextual information about your home
-- **⚡ AI Generation** - Generate dashboards and automations from descriptions
-- **🧪 100% Test Coverage** - 49 comprehensive tests
+- **🧪 Comprehensive Testing** - 87 integration tests with comprehensive memory sync validation
 - **🔒 Secure** - Environment-based configuration, no hardcoded secrets
+- **🤖 AI-Friendly** - Perfect tool for AI assistants to manage Home Assistant
 
 ## 🚀 Quick Start
 
 ### Installation
+
+#### Option 1: With mise (Recommended)
+
+If you use [mise](https://mise.jdx.dev/) for version management:
 
 ```bash
 # Clone the repository
 git clone https://github.com/nachtschatt3n/hactl.git
 cd hactl
 
+# mise will automatically activate the Python version from .mise.toml
+# and create a virtual environment
+
 # Install in development mode
 pip install -e .
 
 # Verify installation
 hactl --version
+```
+
+#### Option 2: Standard Python Installation
+
+```bash
+# Clone the repository
+git clone https://github.com/nachtschatt3n/hactl.git
+cd hactl
+
+# Create virtual environment (Python 3.8+)
+python3 -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+
+# Install in development mode
+pip install -e .
+
+# Verify installation
+hactl --version
+```
+
+#### Option 3: Install from PyPI (when published)
+
+```bash
+pip install hactl
 ```
 
 ### Configuration
@@ -45,6 +75,9 @@ Edit `.env`:
 ```bash
 HASS_URL="https://your-homeassistant-url.com"
 HASS_TOKEN="your_long_lived_access_token_here"
+
+# Optional: For K8s commands
+K8S_NAMESPACE="home-automation"
 ```
 
 **Getting a Long-Lived Access Token:**
@@ -71,12 +104,6 @@ hactl battery list
 
 # Update a dashboard
 hactl update dashboard my-dashboard --from dashboard.yaml
-
-# Sync Home Assistant state to AI memory
-hactl memory sync
-
-# Generate a dashboard from description
-hactl generate dashboard "energy monitoring with solar panels"
 ```
 
 ## 📚 Command Groups
@@ -127,51 +154,65 @@ hactl battery check
 hactl battery monitor
 ```
 
-### K8S - Kubernetes Operations (2 commands)
+### K8S - Kubernetes Operations (4 commands)
 
 ```bash
-# Update Home Assistant config via kubectl
-hactl k8s update-config <helper_file> --namespace <namespace>
-
 # Find Home Assistant pod
 hactl k8s find-pod --namespace <namespace>
+
+# Download configuration from pod
+hactl k8s get-config --output config.yaml
+hactl k8s get-config --file /config/templates.yaml --output templates.yaml
+
+# Upload configuration to pod (with backup and restart)
+hactl k8s put-config config.yaml
+hactl k8s put-config templates.yaml --file /config/templates.yaml --no-restart
+
+# Update config with helper sensors (automated merge)
+hactl k8s update-config battery-summary.yaml --namespace <namespace>
 ```
 
 ### MEMORY - AI Context Management (5 commands)
 
+The memory system helps AI assistants maintain context about your Home Assistant setup. It stores Home Assistant state as **compact CSV files** for token-efficient reading, reducing the need to repeatedly query all states.
+
 ```bash
-# Add contextual note
+# Sync current HA state to memory/  (creates CSV files)
+hactl memory sync
+
+# List all memory files
+hactl memory list
+
+# Add contextual notes for AI
 hactl memory add sensor bedroom_temp "Reads 2°C high, needs calibration"
 
-# Show notes for a category
-hactl memory show sensor
+# Show memory for a category
+hactl memory show sensors
 
-# Edit memory files
+# Edit memory files directly
 hactl memory edit context/preferences.md
-
-# Sync Home Assistant state to memory
-hactl memory sync
-hactl memory sync --category sensors
 ```
 
-### GENERATE - AI-Assisted Creation (6 commands)
+**Memory files created by sync:**
+- `devices.csv` - All devices with manufacturer, model, area (472 devices)
+- `states.csv` - All entity states with current values (2249 entities)
+- `automations.csv` - All automations with status (4 automations)
+- `dashboards.csv` - All dashboards with titles (5 dashboards)
+- `hacs.csv` - Installed HACS repositories with versions and descriptions (44 repos)
+- `areas.csv` - All areas (rooms/zones) with names and aliases (19 areas)
+- `integrations.csv` - All configured integrations with state (155 integrations)
+- `scripts.csv` - All scripts with last triggered time
+- `scenes.csv` - All scenes with icons (14 scenes)
+- `templates.csv` - Template sensors with formulas and state classes (478 templates)
+- `entity_relationships.csv` - Entity relationships and groupings (352 relationships)
+- `automation_stats.csv` - Automation statistics and execution history (4 automations)
+- `service_capabilities.csv` - Available service domains (86 domains)
+- `battery_health.csv` - Battery sensor health tracking
+- `energy_data.csv` - Energy and power sensors for optimization
+- `automation_context.csv` - User annotations about automation purposes (editable)
+- `persons_presence.csv` - Household members, device trackers, and occupancy sensors
 
-```bash
-# Generate dashboard
-hactl generate dashboard "energy monitoring with solar production"
-
-# Generate automation
-hactl generate automation "turn off lights when no motion for 10 minutes"
-
-# Generate blueprint
-hactl generate blueprint "motion-activated lighting for any room"
-
-# List generated content
-hactl generate list
-
-# Apply generated content
-hactl generate apply generated/dashboards/2024-01-15_energy_monitoring.yaml
-```
+**Note:** The memory/ directory is gitignored and not committed. AI assistants can read these compact CSV files to quickly understand your entire setup in just a few thousand tokens.
 
 ## 🎨 Output Formats
 
@@ -214,6 +255,12 @@ hactl get dashboards
 
 # Export dashboard to YAML
 hactl get dashboards --format yaml-single --url-path my-dashboard > backup.yaml
+
+# Export specific VIEW from dashboard (new feature!)
+hactl get dashboards --format yaml-single --url-path my-dashboard/my-view > view.yaml
+
+# Validate dashboard entities (checks against current HA state)
+hactl get dashboards --format validate --url-path my-dashboard/my-view
 
 # Update dashboard
 hactl update dashboard my-dashboard --from backup.yaml

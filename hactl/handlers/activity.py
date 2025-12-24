@@ -4,6 +4,8 @@ Handler migrated from get/activity.py
 
 import json
 import click
+from collections import Counter, defaultdict
+from datetime import datetime, timedelta, timezone
 from hactl.core import load_config, make_api_request, json_to_yaml
 
 def get_activity(format_type='table'):

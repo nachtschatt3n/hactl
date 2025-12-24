@@ -111,8 +111,8 @@ def get_services(format):
 
 
 @get_group.command('dashboards')
-@format_option(['table', 'json', 'yaml', 'detail', 'yaml-save', 'yaml-single'])
-@click.option('--url-path', help='Specific dashboard URL path (for yaml-single)')
+@format_option(['table', 'json', 'yaml', 'detail', 'yaml-save', 'yaml-single', 'validate'])
+@click.option('--url-path', help='Dashboard or view path (e.g., "light-control" or "light-control/battery-monitor")')
 @click.option('--output-dir', default='.', help='Output directory (for yaml-save)')
 def get_dashboards(format, url_path, output_dir):
     """Get dashboard configurations
@@ -123,6 +123,8 @@ def get_dashboards(format, url_path, output_dir):
         hactl get dashboards
         hactl get dashboards --format yaml-save --output-dir dashboards/
         hactl get dashboards --format yaml-single --url-path light-control
+        hactl get dashboards --format yaml-single --url-path light-control/battery-monitor
+        hactl get dashboards --format validate --url-path light-control/battery-monitor
     """
     from hactl.handlers import dashboards
     dashboards.get_dashboards(format, url_path=url_path, output_dir=output_dir)

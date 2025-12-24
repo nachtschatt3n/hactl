@@ -2,11 +2,14 @@
 Handler migrated from get/dashboards.py
 """
 
+import os
+import sys
 import json
 import click
 from hactl.core import load_config, make_api_request, json_to_yaml
+from hactl.core.websocket import WebSocketClient
 
-def get_dashboards(format_type='table'):
+def get_dashboards(format_type='table', url_path=None, output_dir=None):
     """
     Handler for dashboards
 
@@ -123,7 +126,8 @@ def get_dashboards(format_type='table'):
                 click.echo("---\n")
     elif format_type == 'yaml-save':
         # Save each dashboard YAML to a file
-        output_dir = os.environ.get('DASHBOARD_OUTPUT_DIR', '.')
+        if output_dir is None:
+            output_dir = os.environ.get('DASHBOARD_OUTPUT_DIR', '.')
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
         for dash in dashboards:
@@ -145,15 +149,177 @@ def get_dashboards(format_type='table'):
             else:
                 click.echo(f"Skipped: {title} (/{url_path}) - Config not available", file=sys.stderr)
     elif format_type == 'yaml-single':
-        # Output single dashboard YAML (specify with DASHBOARD_URL_PATH env var)
-        target_path = os.environ.get('DASHBOARD_URL_PATH', 'lovelace')
-        if target_path in configs:
-            cfg = configs[target_path]
-            yaml_output = json_to_yaml(cfg)
-            click.echo(yaml_output)
+        # Output single dashboard YAML (specify with url_path parameter)
+        # Support view paths: light-control/battery-monitor
+        target_path = url_path or os.environ.get('DASHBOARD_URL_PATH', 'lovelace')
+
+        # Check if it's a view path (contains /)
+        if '/' in target_path:
+            dashboard_path, view_path = target_path.split('/', 1)
+
+            if dashboard_path in configs:
+                cfg = configs[dashboard_path]
+
+                # Extract specific view
+                views = cfg.get('views', [])
+                found_view = None
+                for view in views:
+                    if view.get('path') == view_path:
+                        found_view = view
+                        break
+
+                if found_view:
+                    click.echo(f"# View: {found_view.get('title', view_path)}")
+                    click.echo(f"# Dashboard: {dashboard_path}")
+                    click.echo(f"# Path: {target_path}")
+                    click.echo("---")
+                    yaml_output = json_to_yaml(found_view)
+                    click.echo(yaml_output)
+                else:
+                    click.echo(f"# View '{view_path}' not found in dashboard '{dashboard_path}'", file=sys.stderr)
+                    click.echo(f"# Available views:", file=sys.stderr)
+                    for view in views:
+                        click.echo(f"#   - {view.get('path', 'N/A')}: {view.get('title', 'Untitled')}", file=sys.stderr)
+                    return
+            else:
+                click.echo(f"# Dashboard '{dashboard_path}' not found", file=sys.stderr)
+                return
         else:
-            click.echo(f"# Dashboard config not found for: {target_path}", file=sys.stderr)
+            # Regular dashboard path
+            if target_path in configs:
+                cfg = configs[target_path]
+                yaml_output = json_to_yaml(cfg)
+                click.echo(yaml_output)
+            else:
+                click.echo(f"# Dashboard config not found for: {target_path}", file=sys.stderr)
+                return
+    elif format_type == 'validate':
+        # Validate dashboard/view entities against memory/states.csv
+        import csv
+        from pathlib import Path
+
+        target_path = url_path or os.environ.get('DASHBOARD_URL_PATH', 'lovelace')
+
+        # Get the config to validate
+        config_to_validate = None
+        display_name = target_path
+
+        if '/' in target_path:
+            dashboard_path, view_path = target_path.split('/', 1)
+            if dashboard_path in configs:
+                cfg = configs[dashboard_path]
+                views = cfg.get('views', [])
+                for view in views:
+                    if view.get('path') == view_path:
+                        config_to_validate = view
+                        display_name = f"{view.get('title', view_path)} ({target_path})"
+                        break
+                if not config_to_validate:
+                    click.echo(f"Error: View '{view_path}' not found in dashboard '{dashboard_path}'", file=sys.stderr)
+                    return
+            else:
+                click.echo(f"Error: Dashboard '{dashboard_path}' not found", file=sys.stderr)
+                return
+        else:
+            if target_path in configs:
+                config_to_validate = configs[target_path]
+                display_name = f"Dashboard: {target_path}"
+            else:
+                click.echo(f"Error: Dashboard '{target_path}' not found", file=sys.stderr)
+                return
+
+        # Extract all entities from the config
+        def extract_entities(obj, entities=None):
+            """Recursively extract entity IDs from a config object"""
+            if entities is None:
+                entities = set()
+
+            if isinstance(obj, dict):
+                # Check for entity field
+                if 'entity' in obj and isinstance(obj['entity'], str):
+                    entities.add(obj['entity'])
+                # Check for entities list
+                if 'entities' in obj:
+                    if isinstance(obj['entities'], list):
+                        for ent in obj['entities']:
+                            if isinstance(ent, str):
+                                entities.add(ent)
+                            elif isinstance(ent, dict):
+                                extract_entities(ent, entities)
+                # Recurse into all dict values
+                for value in obj.values():
+                    extract_entities(value, entities)
+            elif isinstance(obj, list):
+                for item in obj:
+                    extract_entities(item, entities)
+
+            return entities
+
+        dashboard_entities = extract_entities(config_to_validate)
+
+        # Load memory/states.csv
+        memory_dir = Path.cwd() / 'memory'
+        states_csv = memory_dir / 'states.csv'
+
+        if not states_csv.exists():
+            click.echo("Warning: memory/states.csv not found. Run 'hactl memory sync' first.", file=sys.stderr)
+            click.echo(f"\nFound {len(dashboard_entities)} entities in config (cannot validate):")
+            for entity in sorted(dashboard_entities):
+                click.echo(f"  - {entity}")
             return
+
+        # Load existing entities
+        existing_entities = {}
+        with open(states_csv, 'r') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                entity_id = row['entity_id']
+                existing_entities[entity_id] = {
+                    'friendly_name': row['friendly_name'],
+                    'domain': row['domain']
+                }
+
+        # Check which entities are missing
+        missing = []
+        valid = []
+        for entity in dashboard_entities:
+            if entity in existing_entities:
+                valid.append(entity)
+            else:
+                missing.append(entity)
+
+        # Output validation report
+        click.echo(f"=== Validating: {display_name} ===")
+        click.echo(f"Total entities: {len(dashboard_entities)}")
+        click.secho(f"✓ Valid: {len(valid)}", fg='green')
+
+        if missing:
+            click.secho(f"✗ Missing: {len(missing)}", fg='red')
+            click.echo("\nMissing entities:")
+
+            # Find suggestions for each missing entity
+            for missing_entity in sorted(missing):
+                click.echo(f"  - {missing_entity}")
+
+                # Try to find similar entities
+                domain = missing_entity.split('.')[0] if '.' in missing_entity else ''
+                name_part = missing_entity.split('.')[1] if '.' in missing_entity else missing_entity
+
+                # Find entities in same domain with similar names
+                suggestions = []
+                for entity_id, info in existing_entities.items():
+                    if info['domain'] == domain:
+                        # Check if name is similar
+                        entity_name = entity_id.split('.')[1] if '.' in entity_id else entity_id
+                        if name_part.lower() in entity_name.lower() or entity_name.lower() in name_part.lower():
+                            suggestions.append((entity_id, info['friendly_name']))
+
+                if suggestions:
+                    click.echo(f"    Suggestions:")
+                    for sugg_id, sugg_name in suggestions[:3]:
+                        click.echo(f"      → {sugg_id} ({sugg_name})")
+        else:
+            click.secho("✓ All entities valid!", fg='green')
     elif format_type == 'detail':
         for dash in results:
             click.echo(f"Dashboard: {dash['title']} (/{dash['url_path']}) mode={dash.get('mode','')} views={len(dash['views'])}")

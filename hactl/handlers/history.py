@@ -2,8 +2,10 @@
 Handler migrated from get/history.py
 """
 
+import sys
 import json
 import click
+from datetime import datetime, timedelta, timezone
 from hactl.core import load_config, make_api_request, json_to_yaml
 
 def get_history(format_type='table'):
@@ -14,10 +16,9 @@ def get_history(format_type='table'):
         format_type: Output format
     """
 
-    # Get entity_id and format from command line
-    entity_id = sys.argv[1] if len(sys.argv) > 1 and not sys.argv[1] in ['table', 'json', 'detail', 'yaml'] else None
-    format_type = sys.argv[-1] if len(sys.argv) > 1 and sys.argv[-1] in ['table', 'json', 'detail', 'yaml'] else 'table'
-    
+    # For now, only show general history (entity_id support can be added via Click option later)
+    entity_id = None
+
     # Load configuration from environment
     HASS_URL, HASS_TOKEN = load_config()
     

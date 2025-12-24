@@ -42,12 +42,9 @@ def update_dashboard(url_path, yaml_file):
     ws = WebSocketClient(HASS_URL, HASS_TOKEN)
     try:
         ws.connect()
-        result = ws.call("lovelace/config/save", url_path=url_path, config=config)
-
-        if result:
-            click.secho(f"✓ Successfully updated dashboard: {url_path}", fg='green')
-        else:
-            raise click.ClickException(f"Dashboard update failed. Result: {result}")
+        # WebSocket call raises exception on failure, so if we get here it succeeded
+        ws.call("lovelace/config/save", url_path=url_path, config=config)
+        click.secho(f"✓ Successfully updated dashboard: {url_path}", fg='green')
     finally:
         ws.close()
 
@@ -60,11 +57,8 @@ def create_dashboard(url_path, yaml_file):
     ws = WebSocketClient(HASS_URL, HASS_TOKEN)
     try:
         ws.connect()
-        result = ws.call("lovelace/config/save", url_path=url_path, config=config)
-
-        if result:
-            click.secho(f"✓ Successfully created dashboard: {url_path}", fg='green')
-        else:
-            raise click.ClickException(f"Dashboard creation failed. Result: {result}")
+        # WebSocket call raises exception on failure, so if we get here it succeeded
+        ws.call("lovelace/config/save", url_path=url_path, config=config)
+        click.secho(f"✓ Successfully created dashboard: {url_path}", fg='green')
     finally:
         ws.close()

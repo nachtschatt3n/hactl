@@ -4,13 +4,13 @@ Device operations handler
 
 import json
 import click
-from collections import defaultdict
-from hactl.core import load_config, make_api_request, json_to_yaml
+from hactl.core import load_config, json_to_yaml
+from hactl.core.websocket import WebSocketClient
 
 
 def get_devices(format_type='table'):
     """
-    Get all devices from Home Assistant.
+    Get all devices from Home Assistant using WebSocket API.
 
     Args:
         format_type: Output format (table, json, yaml, detail)
@@ -18,45 +18,21 @@ def get_devices(format_type='table'):
     # Load configuration from environment
     HASS_URL, HASS_TOKEN = load_config()
 
-    # Fetch all states
-    url = f"{HASS_URL}/api/states"
-    states = make_api_request(url, HASS_TOKEN)
+    # Use WebSocket to get device registry
+    ws = WebSocketClient(HASS_URL, HASS_TOKEN)
+    try:
+        ws.connect()
+        device_list = ws.call('config/device_registry/list')
+        ws.close()
+    except Exception as e:
+        click.echo(f"Error fetching devices: {e}", err=True)
+        device_list = []
 
-    # Group entities by device
-    devices = defaultdict(lambda: {
-        'device_id': None,
-        'device_name': None,
-        'manufacturer': None,
-        'model': None,
-        'area_id': None,
-        'entities': [],
-        'entity_count': 0
-    })
+    if not device_list:
+        device_list = []
 
-    for state in states:
-        attrs = state.get('attributes', {})
-        device_id = attrs.get('device_id')
-        if device_id:
-            if devices[device_id]['device_id'] is None:
-                devices[device_id]['device_id'] = device_id
-                devices[device_id]['device_name'] = attrs.get('device_name') or attrs.get('friendly_name', '').split(' ')[0]
-                devices[device_id]['manufacturer'] = attrs.get('manufacturer')
-                devices[device_id]['model'] = attrs.get('model')
-                devices[device_id]['area_id'] = attrs.get('area_id')
-
-            devices[device_id]['entities'].append({
-                'entity_id': state.get('entity_id'),
-                'friendly_name': attrs.get('friendly_name'),
-                'state': state.get('state')
-            })
-            devices[device_id]['entity_count'] = len(devices[device_id]['entities'])
-
-    # Convert to list and sort
-    device_list = []
-    for device_id, device_info in devices.items():
-        device_list.append(device_info)
-
-    device_list.sort(key=lambda x: (x['device_name'] or '').lower())
+    # Sort by name
+    device_list.sort(key=lambda x: (x.get('name') or x.get('name_by_user') or '').lower())
 
     # Format output
     if format_type == 'json':
@@ -70,29 +46,29 @@ def get_devices(format_type='table'):
         click.echo(f"Total Devices: {len(device_list)}\n")
 
         for device in device_list:
-            click.echo(f"**{device['device_name'] or 'Unknown'}** (ID: {device['device_id']})")
+            name = device.get('name') or device.get('name_by_user') or 'Unknown'
+            click.echo(f"**{name}** (ID: {device.get('id')})")
             if device.get('manufacturer'):
                 click.echo(f"  - Manufacturer: {device['manufacturer']}")
             if device.get('model'):
                 click.echo(f"  - Model: {device['model']}")
             if device.get('area_id'):
-                click.echo(f"  - Area: {device['area_id']}")
-            click.echo(f"  - Entities: {device['entity_count']}")
-            if device['entities']:
-                click.echo("  - Entity List:")
-                for entity in device['entities'][:5]:
-                    click.echo(f"    - {entity['entity_id']} ({entity['friendly_name']})")
-                if len(device['entities']) > 5:
-                    click.echo(f"    ... and {len(device['entities']) - 5} more")
+                click.echo(f"  - Area ID: {device['area_id']}")
+            if device.get('sw_version'):
+                click.echo(f"  - Software Version: {device['sw_version']}")
+            if device.get('hw_version'):
+                click.echo(f"  - Hardware Version: {device['hw_version']}")
+            if device.get('via_device_id'):
+                click.echo(f"  - Connected via: {device['via_device_id']}")
             click.echo()
     else:  # table format
         click.echo("=== Home Assistant Devices ===\n")
         click.echo(f"Total Devices: {len(device_list)}\n")
-        click.echo(f"{'Device Name':<40} {'Manufacturer':<25} {'Model':<30} {'Area':<20} {'Entities':<10}")
-        click.echo("-" * 125)
+        click.echo(f"{'Device Name':<40} {'Manufacturer':<25} {'Model':<30} {'Area ID':<20}")
+        click.echo("-" * 115)
 
         for device in device_list:
-            name = device['device_name'] or 'Unknown'
+            name = device.get('name') or device.get('name_by_user') or 'Unknown'
             if len(name) > 38:
                 name = name[:35] + '...'
             manufacturer = device.get('manufacturer') or '-'
@@ -104,5 +80,5 @@ def get_devices(format_type='table'):
             area = device.get('area_id') or '-'
             if len(area) > 18:
                 area = area[:15] + '...'
-            click.echo(f"{name:<40} {manufacturer:<25} {model:<30} {area:<20} {device['entity_count']:<10}")
+            click.echo(f"{name:<40} {manufacturer:<25} {model:<30} {area:<20}")
         click.echo()

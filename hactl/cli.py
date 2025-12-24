@@ -41,9 +41,9 @@ def cli(ctx, verbose, quiet):
         hactl k8s update-config battery-summary.yaml
 
     \b
-        # AI memory and generation
+        # AI Context Management
         hactl memory sync
-        hactl generate dashboard "energy monitoring"
+        hactl memory list
     """
     ctx.ensure_object(dict)
     ctx.obj['verbose'] = verbose
@@ -51,14 +51,13 @@ def cli(ctx, verbose, quiet):
 
 
 # Register command groups
-from hactl.commands import get_group, update_group, battery_group, k8s_group, memory_group, generate_group
+from hactl.commands import get_group, update_group, battery_group, k8s_group, memory_group
 
 cli.add_command(get_group)
 cli.add_command(update_group)
 cli.add_command(battery_group)
 cli.add_command(k8s_group)
 cli.add_command(memory_group)
-cli.add_command(generate_group)
 
 
 if __name__ == '__main__':

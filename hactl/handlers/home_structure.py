@@ -2,8 +2,10 @@
 Handler migrated from get/home_structure.py
 """
 
+import sys
 import json
 import click
+from collections import defaultdict, Counter
 from hactl.core import load_config, make_api_request, json_to_yaml
 
 def get_home_structure(format_type='table'):

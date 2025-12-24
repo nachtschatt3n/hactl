@@ -45,3 +45,42 @@ def k8s_find_pod(namespace):
     """
     from hactl.handlers import k8s_config
     k8s_config.find_pod(namespace=namespace)
+
+
+@k8s_group.command('get-config')
+@click.option('--namespace', '-n', default='home-automation', help='Kubernetes namespace')
+@click.option('--output', '-o', type=click.Path(), help='Output file (default: stdout)')
+@click.option('--file', '-f', default='/config/configuration.yaml', help='Config file path in pod')
+def k8s_get_config(namespace, output, file):
+    """Get Home Assistant configuration from Kubernetes pod
+
+    Examples:
+
+    \b
+        hactl k8s get-config
+        hactl k8s get-config --output config.yaml
+        hactl k8s get-config --file /config/templates.yaml
+    """
+    from hactl.handlers import k8s_config
+    k8s_config.get_config(namespace=namespace, output_file=output, config_file=file)
+
+
+@k8s_group.command('put-config')
+@click.argument('input_file', type=click.Path(exists=True))
+@click.option('--namespace', '-n', default='home-automation', help='Kubernetes namespace')
+@click.option('--file', '-f', default='/config/configuration.yaml', help='Config file path in pod')
+@click.option('--backup/--no-backup', default=True, help='Create backup before updating')
+@click.option('--restart/--no-restart', default=True, help='Restart Home Assistant after update')
+def k8s_put_config(input_file, namespace, file, backup, restart):
+    """Upload configuration to Home Assistant pod
+
+    Examples:
+
+    \b
+        hactl k8s put-config config.yaml
+        hactl k8s put-config templates.yaml --file /config/templates.yaml
+        hactl k8s put-config config.yaml --no-restart
+    """
+    from hactl.handlers import k8s_config
+    k8s_config.put_config(input_file, namespace=namespace, config_file=file,
+                          backup=backup, restart=restart)
