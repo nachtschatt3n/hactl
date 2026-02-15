@@ -300,6 +300,65 @@ def mock_integrations_response():
 
 
 @pytest.fixture
+def mock_device_registry_response():
+    """Mock device registry response from WebSocket API"""
+    return [
+        {
+            'id': 'device_001',
+            'name': 'Living Room Light',
+            'name_by_user': None,
+            'manufacturer': 'Philips',
+            'model': 'Hue White',
+            'area_id': 'living_room',
+            'sw_version': '1.50.2',
+            'hw_version': None,
+            'via_device_id': 'device_hub_001'
+        },
+        {
+            'id': 'device_002',
+            'name': 'Temperature Sensor',
+            'name_by_user': None,
+            'manufacturer': 'Aqara',
+            'model': 'WSDCGQ11LM',
+            'area_id': 'bedroom',
+            'sw_version': None,
+            'hw_version': None,
+            'via_device_id': None
+        },
+        {
+            'id': 'device_003',
+            'name': 'Smart Plug',
+            'name_by_user': 'Kitchen Plug',
+            'manufacturer': 'TP-Link',
+            'model': 110,
+            'area_id': None,
+            'sw_version': '2.0',
+            'hw_version': None,
+            'via_device_id': None
+        }
+    ]
+
+
+@pytest.fixture
+def mock_websocket(monkeypatch, mock_device_registry_response):
+    """Mock WebSocketClient for device registry tests"""
+    from unittest.mock import MagicMock
+    mock_ws = MagicMock()
+    mock_ws.call.return_value = mock_device_registry_response
+
+    def mock_ws_init(self, url, token):
+        self.url = url
+        self.token = token
+
+    monkeypatch.setattr('hactl.core.websocket.WebSocketClient.__init__', mock_ws_init)
+    monkeypatch.setattr('hactl.core.websocket.WebSocketClient.connect', lambda self: None)
+    monkeypatch.setattr('hactl.core.websocket.WebSocketClient.close', lambda self: None)
+    monkeypatch.setattr('hactl.core.websocket.WebSocketClient.call', lambda self, cmd: mock_device_registry_response)
+
+    return mock_ws
+
+
+@pytest.fixture
 def mock_api_request(monkeypatch, mock_states_response, mock_services_response,
                      mock_events_response, mock_logbook_response, mock_integrations_response):
     """Mock make_api_request function for both old and new code"""

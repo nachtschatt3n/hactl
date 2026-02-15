@@ -68,16 +68,16 @@ def get_devices(format_type='table'):
         click.echo("-" * 115)
 
         for device in device_list:
-            name = device.get('name') or device.get('name_by_user') or 'Unknown'
+            name = str(device.get('name') or device.get('name_by_user') or 'Unknown')
             if len(name) > 38:
                 name = name[:35] + '...'
-            manufacturer = device.get('manufacturer') or '-'
+            manufacturer = str(device.get('manufacturer') or '-')
             if len(manufacturer) > 23:
                 manufacturer = manufacturer[:20] + '...'
-            model = device.get('model') or '-'
+            model = str(device.get('model') or '-')
             if len(model) > 28:
                 model = model[:25] + '...'
-            area = device.get('area_id') or '-'
+            area = str(device.get('area_id') or '-')
             if len(area) > 18:
                 area = area[:15] + '...'
             click.echo(f"{name:<40} {manufacturer:<25} {model:<30} {area:<20}")

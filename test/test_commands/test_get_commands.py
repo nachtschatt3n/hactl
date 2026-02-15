@@ -10,7 +10,7 @@ from hactl.cli import cli
 class TestGetDevices:
     """Test hactl get devices command"""
 
-    def test_devices_table_format(self, mock_env_vars, mock_api_request):
+    def test_devices_table_format(self, mock_env_vars, mock_websocket):
         """Test devices output in table format"""
         runner = CliRunner()
         result = runner.invoke(cli, ['get', 'devices', '--format', 'table'])
@@ -19,7 +19,7 @@ class TestGetDevices:
         assert 'Home Assistant Devices' in result.output
         assert 'Total Devices:' in result.output
 
-    def test_devices_json_format(self, mock_env_vars, mock_api_request):
+    def test_devices_json_format(self, mock_env_vars, mock_websocket):
         """Test devices output in JSON format"""
         runner = CliRunner()
         result = runner.invoke(cli, ['get', 'devices', '--format', 'json'])
@@ -29,7 +29,7 @@ class TestGetDevices:
         assert result.output.strip().startswith('[')
         assert result.output.strip().endswith(']')
 
-    def test_devices_yaml_format(self, mock_env_vars, mock_api_request):
+    def test_devices_yaml_format(self, mock_env_vars, mock_websocket):
         """Test devices output in YAML format"""
         runner = CliRunner()
         result = runner.invoke(cli, ['get', 'devices', '--format', 'yaml'])
@@ -38,7 +38,7 @@ class TestGetDevices:
         assert 'Home Assistant Devices' in result.output
         assert '---' in result.output
 
-    def test_devices_default_format(self, mock_env_vars, mock_api_request):
+    def test_devices_default_format(self, mock_env_vars, mock_websocket):
         """Test devices with default format (table)"""
         runner = CliRunner()
         result = runner.invoke(cli, ['get', 'devices'])
