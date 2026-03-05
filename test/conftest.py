@@ -413,6 +413,7 @@ def mock_api_request(monkeypatch, mock_states_response, mock_services_response,
         'hactl.handlers.memory_mgmt',
         'hactl.handlers.dashboard_ops',
         'hactl.handlers.helper_ops',
+        'hactl.handlers.doctor',
     ]
 
     for module in handler_modules:
