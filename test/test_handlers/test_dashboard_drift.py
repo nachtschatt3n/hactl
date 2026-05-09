@@ -181,6 +181,87 @@ class TestUpdateDashboard:
         assert len(backups) == 1
 
 
+class TestUnifiedDiff:
+    def test_shows_changes(self):
+        live = {"title": "New", "views": []}
+        disk = {"title": "Old", "views": []}
+        result = dashboard_ops._unified_diff(live, disk, "disk.yaml")
+        assert "-title: Old" in result
+        assert "+title: New" in result
+
+    def test_truncates_long_diff(self):
+        live = {str(i): "live" for i in range(50)}
+        disk = {str(i): "disk" for i in range(50)}
+        result = dashboard_ops._unified_diff(live, disk, "disk.yaml", max_lines=5)
+        assert "truncated" in result
+
+
+class TestCreateDashboard:
+    def test_create_new_dashboard_saves_without_backup(self, tmp_path, monkeypatch, fake_ws, capsys):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        fake_ws._live_config = None  # dashboard doesn't exist yet
+
+        src = tmp_path / "new.yaml"
+        _write_yaml(src, {"title": "New", "views": []})
+
+        dashboard_ops.create_dashboard("new-dash", str(src))
+
+        out = capsys.readouterr().out
+        assert "Successfully created dashboard" in out
+        assert "backup:" not in out
+
+        call_types = [c[0] for c in fake_ws.calls]
+        assert "lovelace/config/save" in call_types
+
+    def test_create_existing_no_drift_takes_backup(self, tmp_path, monkeypatch, fake_ws, capsys):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        payload = {"title": "Battery", "views": [{"title": "Main"}]}
+        fake_ws._live_config = {"version": 3, **payload}
+
+        src = tmp_path / "battery.yaml"
+        _write_yaml(src, payload)
+
+        dashboard_ops.create_dashboard("battery-monitor", str(src))
+
+        out = capsys.readouterr().out
+        assert "backup:" in out
+        assert "Successfully created dashboard" in out
+        backups = list((tmp_path / ".hactl" / "backups").glob("dashboard_battery-monitor_*.yaml"))
+        assert len(backups) == 1
+
+    def test_create_existing_drift_blocks_and_includes_pull_hint(self, tmp_path, monkeypatch, fake_ws):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        fake_ws._live_config = {"title": "Battery", "views": [{"title": "Edited"}]}
+
+        src = tmp_path / "battery.yaml"
+        _write_yaml(src, {"title": "Battery", "views": [{"title": "Original"}]})
+
+        with pytest.raises(click.ClickException) as exc:
+            dashboard_ops.create_dashboard("battery-monitor", str(src))
+
+        msg = exc.value.message
+        assert "already exists and has diverged from" in msg
+        assert "to overwrite anyway: re-run with --force" in msg
+        assert "hactl pull dashboard battery-monitor" in msg
+
+        call_types = [c[0] for c in fake_ws.calls]
+        assert "lovelace/config/save" not in call_types
+
+    def test_create_force_bypasses_drift(self, tmp_path, monkeypatch, fake_ws):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        fake_ws._live_config = {"title": "Battery", "views": [{"title": "Edited"}]}
+
+        src = tmp_path / "battery.yaml"
+        _write_yaml(src, {"title": "Battery", "views": [{"title": "Original"}]})
+
+        dashboard_ops.create_dashboard("battery-monitor", str(src), force=True)
+
+        call_types = [c[0] for c in fake_ws.calls]
+        assert "lovelace/config/save" in call_types
+        backups = list((tmp_path / ".hactl" / "backups").glob("dashboard_battery-monitor_*.yaml"))
+        assert len(backups) == 1
+
+
 class TestPullDashboard:
     def test_pull_writes_live_config_to_disk(self, tmp_path, monkeypatch, fake_ws):
         monkeypatch.setenv("HOME", str(tmp_path))

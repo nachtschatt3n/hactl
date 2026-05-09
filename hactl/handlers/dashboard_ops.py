@@ -6,9 +6,8 @@ silently clobber UI edits made directly in the Home Assistant frontend.
 """
 
 import datetime
-import io
+import difflib
 import json
-import os
 from pathlib import Path
 
 import click
@@ -26,14 +25,14 @@ except ImportError:
     yaml = None
 
 
-# Fields that the HA backend may inject or rewrite. We ignore these when
-# deciding whether the live config has drifted from the on-disk source.
-_TRIVIAL_TOP_LEVEL_KEYS = frozenset({"version"})
+# Keys that HA may inject or rewrite at any dict level; ignored when comparing
+# live vs on-disk config to avoid false-positive drift signals.
+_IGNORED_KEYS = frozenset({"version"})
 
 
 def _backup_dir() -> Path:
     """Return ~/.hactl/backups, creating it if missing."""
-    base = Path(os.path.expanduser("~/.hactl/backups"))
+    base = Path.home() / ".hactl" / "backups"
     base.mkdir(parents=True, exist_ok=True)
     return base
 
@@ -57,18 +56,14 @@ def load_yaml_file(yaml_file):
 
 
 def _dump_yaml(obj) -> str:
-    """Dump a dict to YAML in roughly the same shape ``hactl generate`` uses.
-
-    Falls back to the in-house ``json_to_yaml`` if PyYAML is not installed,
-    which guarantees something restorable even on minimal installs.
-    """
+    """Dump a dict to YAML; falls back to in-house json_to_yaml if PyYAML is absent."""
     if HAS_YAML:
         return yaml.safe_dump(obj, sort_keys=False, allow_unicode=True, default_flow_style=False)
     return json_to_yaml(obj)
 
 
 def _utc_timestamp() -> str:
-    """RFC3339-ish timestamp safe for filenames."""
+    """ISO 8601 basic timestamp safe for filenames."""
     return datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
@@ -90,14 +85,18 @@ def _normalize_for_diff(obj):
     """Return a comparable representation that ignores HA-injected metadata.
 
     Rules:
-      * drop the top-level ``version`` key (HA stamps this on writes)
+      * drop keys in ``_IGNORED_KEYS`` (e.g. ``version``, which HA stamps on writes)
       * drop ``None`` values everywhere (PyYAML round-trip can introduce them)
       * recurse into dicts and lists; preserve list ordering (semantically meaningful in lovelace)
+
+    Note: ``_IGNORED_KEYS`` is applied at every dict level, not just the root.
+    ``version`` appearing inside a nested card would also be stripped — acceptable
+    in practice since HA only injects it at the top level.
     """
     if isinstance(obj, dict):
         out = {}
         for k, v in obj.items():
-            if k in _TRIVIAL_TOP_LEVEL_KEYS:
+            if k in _IGNORED_KEYS:
                 continue
             if v is None:
                 continue
@@ -115,8 +114,6 @@ def _configs_equivalent(live, on_disk) -> bool:
 
 def _unified_diff(live, on_disk, source_path: str, max_lines: int = 30) -> str:
     """Return a short unified diff between the live and on-disk configs."""
-    import difflib
-
     live_text = _dump_yaml(_normalize_for_diff(live)).splitlines()
     disk_text = _dump_yaml(_normalize_for_diff(on_disk)).splitlines()
     diff = list(difflib.unified_diff(
@@ -153,43 +150,45 @@ def _write_backup(slug: str, live_config) -> Path:
     return path
 
 
-def update_dashboard(url_path, yaml_file, force: bool = False):
-    """Update an existing dashboard, with backup + drift detection.
+def _backup_and_check_drift(ws, url_path: str, new_config, yaml_file: str,
+                             force: bool, error_prefix: str):
+    """Fetch live config, back it up, and raise on drift (unless force).
 
-    Args:
-        url_path: lovelace url_path of the dashboard (e.g. ``battery-monitor``).
-        yaml_file: path to the YAML file holding the new config.
-        force: if True, skip the drift check (backup is still taken).
+    Always takes a backup when a live config exists; the backup path appears in
+    both the stdout confirmation line and the drift error message.
     """
+    live_config = _fetch_live_config(ws, url_path)
+    if live_config is None:
+        return
+
+    backup_path = _write_backup(url_path, live_config)
+    click.echo(f"backup: {backup_path}")
+
+    if not force and not _configs_equivalent(live_config, new_config):
+        diff_text = _unified_diff(live_config, new_config, yaml_file)
+        lines = [
+            error_prefix,
+            f"live -> backed up to {backup_path}",
+            "diff:",
+            diff_text,
+            "to overwrite anyway: re-run with --force",
+            f"to merge: hactl pull dashboard {url_path} --to {yaml_file} first, then update.",
+        ]
+        raise click.ClickException("\n".join(lines))
+
+
+def update_dashboard(url_path, yaml_file, force: bool = False):
+    """Update an existing dashboard, with backup + drift detection."""
     HASS_URL, HASS_TOKEN = load_config()
     new_config = load_yaml_file(yaml_file)
 
     ws = WebSocketClient(HASS_URL, HASS_TOKEN)
     try:
         ws.connect()
-
-        # Step 1: fetch live config and back it up before doing anything destructive.
-        live_config = _fetch_live_config(ws, url_path)
-        backup_path = None
-        if live_config is not None:
-            backup_path = _write_backup(url_path, live_config)
-            click.echo(f"backup: {backup_path}")
-
-        # Step 2: drift detection (default-on).
-        if live_config is not None and not force:
-            if not _configs_equivalent(live_config, new_config):
-                diff_text = _unified_diff(live_config, new_config, yaml_file)
-                lines = [
-                    f"error: live dashboard '{url_path}' has diverged from {yaml_file}.",
-                    f"live -> backed up to {backup_path}",
-                    "diff:",
-                    diff_text,
-                    "to overwrite anyway: re-run with --force",
-                    f"to merge: hactl pull dashboard {url_path} --to {yaml_file} first, then update.",
-                ]
-                raise click.ClickException("\n".join(lines))
-
-        # Step 3: actually push.
+        _backup_and_check_drift(
+            ws, url_path, new_config, yaml_file, force,
+            f"error: live dashboard '{url_path}' has diverged from {yaml_file}.",
+        )
         ws.call("lovelace/config/save", url_path=url_path, config=new_config)
         click.secho(f"✓ Successfully updated dashboard: {url_path}", fg='green')
     finally:
@@ -208,29 +207,17 @@ def create_dashboard(url_path, yaml_file, force: bool = False):
     ws = WebSocketClient(HASS_URL, HASS_TOKEN)
     try:
         ws.connect()
-
-        live_config = _fetch_live_config(ws, url_path)
-        if live_config is not None:
-            backup_path = _write_backup(url_path, live_config)
-            click.echo(f"backup: {backup_path}")
-            if not force and not _configs_equivalent(live_config, new_config):
-                diff_text = _unified_diff(live_config, new_config, yaml_file)
-                lines = [
-                    f"error: dashboard '{url_path}' already exists and has diverged from {yaml_file}.",
-                    f"live -> backed up to {backup_path}",
-                    "diff:",
-                    diff_text,
-                    "to overwrite anyway: re-run with --force",
-                ]
-                raise click.ClickException("\n".join(lines))
-
+        _backup_and_check_drift(
+            ws, url_path, new_config, yaml_file, force,
+            f"error: dashboard '{url_path}' already exists and has diverged from {yaml_file}.",
+        )
         ws.call("lovelace/config/save", url_path=url_path, config=new_config)
         click.secho(f"✓ Successfully created dashboard: {url_path}", fg='green')
     finally:
         ws.close()
 
 
-def pull_dashboard(url_path: str, to_path: str) -> Path:
+def pull_dashboard(url_path: str, to_path: str) -> None:
     """Fetch the live lovelace config for ``url_path`` and write it to ``to_path``.
 
     Recovery path referenced in the drift-blocked error message.
@@ -249,4 +236,3 @@ def pull_dashboard(url_path: str, to_path: str) -> Path:
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(_dump_yaml(live_config), encoding="utf-8")
     click.secho(f"✓ Pulled dashboard '{url_path}' to {out}", fg='green')
-    return out
