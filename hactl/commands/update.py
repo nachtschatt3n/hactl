@@ -15,7 +15,8 @@ def update_group():
 @click.argument('url_path')
 @click.option('--from', 'from_file', required=True, type=click.Path(exists=True), help='YAML file to load')
 @click.option('--create', is_flag=True, help='Create new dashboard (vs update existing)')
-def update_dashboard(url_path, from_file, create):
+@click.option('--force', is_flag=True, help='Bypass the drift check and overwrite the live dashboard. A backup is still taken first.')
+def update_dashboard(url_path, from_file, create, force):
     """Update or create a dashboard
 
     Examples:
@@ -23,12 +24,13 @@ def update_dashboard(url_path, from_file, create):
     \b
         hactl update dashboard battery-monitor --from dashboard.yaml
         hactl update dashboard new-dash --from new.yaml --create
+        hactl update dashboard battery-monitor --from dashboard.yaml --force
     """
     from hactl.handlers import dashboard_ops
     if create:
-        dashboard_ops.create_dashboard(url_path, from_file)
+        dashboard_ops.create_dashboard(url_path, from_file, force=force)
     else:
-        dashboard_ops.update_dashboard(url_path, from_file)
+        dashboard_ops.update_dashboard(url_path, from_file, force=force)
 
 
 @update_group.command('helper')
