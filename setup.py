@@ -17,7 +17,7 @@ else:
 
 setup(
     name='hactl',
-    version='1.0.0',
+    version='1.1.1',
     description='kubectl-style CLI for Home Assistant API',
     long_description=long_description,
     long_description_content_type='text/markdown',

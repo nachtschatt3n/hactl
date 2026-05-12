@@ -4,6 +4,7 @@ Handler migrated from get/error_log.py
 
 import json
 import click
+from datetime import datetime, timezone, timedelta
 from hactl.core import load_config, make_api_request, json_to_yaml
 
 def get_error_log(format_type='table'):

@@ -5,6 +5,16 @@ All notable changes to hactl will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.1] - 2026-05-10
+
+### Fixed
+
+- `hactl get error-log` crashed with `NameError: name 'datetime' is not defined` because `error_log.py` referenced `datetime.now(timezone.utc)` and `timedelta(hours=24)` without importing them. Added the missing `from datetime import datetime, timezone, timedelta` import. Closes #123.
+
+### Chore
+
+- Bumped `__version__` / `setup.py` to `1.1.1` (was stale at `1.0.0`).
+
 ## [1.0.0] - 2024-12-24
 
 ### 🎉 Initial Release
