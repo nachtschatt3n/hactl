@@ -44,6 +44,7 @@ class WebSocketClient:
               "Connection: Upgrade\r\n" \
               f"Sec-WebSocket-Key: {key}\r\n" \
               "Sec-WebSocket-Version: 13\r\n" \
+              "User-Agent: Mozilla/5.0 (hactl)\r\n" \
               f"Origin: {self.url}\r\n\r\n"
         self.sock.sendall(req.encode())
 

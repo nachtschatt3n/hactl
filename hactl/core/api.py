@@ -29,6 +29,10 @@ def make_api_request(url: str, token: str, method: str = 'GET',
     req = urllib.request.Request(url)
     req.add_header('Authorization', f'Bearer {token}')
     req.add_header('Content-Type', 'application/json')
+    # Browser-shaped UA: Cloudflare's WAF returns 1010 on the default
+    # `Python-urllib/<ver>` UA when DNS for HASS_URL falls back to a CF
+    # edge IP (e.g. AdGuard split-horizon temporarily unreachable).
+    req.add_header('User-Agent', 'Mozilla/5.0 (hactl)')
 
     try:
         if data and method in ('POST', 'PUT', 'PATCH'):
