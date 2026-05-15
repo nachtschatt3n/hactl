@@ -24,6 +24,12 @@ hactl get zombie-devices [-o table|json|csv|yaml]
 | `--no-truncate` | off | Table mode: dump every row instead of the top-20-per-category default. |
 | `--ignore-label` | `haghs_ignore` (env `HACTL_IGNORE_LABEL`) | Entity OR its parent device carrying this label is skipped from every category. Cross-tool compatible with HAGHS. |
 
+> **Reduce false positives by labeling known-flaky devices.** Use
+> [`hactl label apply --from-allowlist ... --label haghs_ignore`](label.md)
+> to bulk-apply the ignore label from a YAML allowlist (cberg's
+> `noise_allowlist.yaml` shape) — every category here will then skip
+> the labelled records automatically.
+
 ## What's a zombie device?
 
 There are five categories. Treat the question as: **"should I keep this

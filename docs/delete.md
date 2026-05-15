@@ -10,6 +10,14 @@ manifest form (`-f file.json` or `-f -` from stdin).
 > rollback. The audit log written on every real run is forensic
 > evidence, not a transaction log.
 
+> **Reduce false positives by labeling known-flaky devices first.**
+> If you find yourself reaching for `delete` on a device that's just
+> noisy (intermittent Zigbee, Shelly WiFi flap, etc.), tag it with
+> `haghs_ignore` via [`hactl label`](label.md) instead — `hactl get
+> zombie-devices` and `hactl doctor` both honour the label and skip
+> labelled records. Delete is for genuine garbage; label is for
+> "stop counting this as a problem."
+
 ## Hard rules
 
 1. **Default is dry-run.** Without `--yes`, every invocation prints the

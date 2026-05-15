@@ -176,6 +176,38 @@ singular: y/N prompt; `--force` bypasses).
 See [`docs/delete.md`](docs/delete.md) for the full SOP, safety
 predicate, and audit-log format.
 
+### LABEL - Manage Registry Labels (kubectl-style)
+
+Generic add/remove of HA `label_registry` labels on devices and
+entities. Default is dry-run unless `--yes`. Idempotent.
+
+```bash
+# List every label + per-label usage counts
+hactl label list
+
+# Apply a label
+hactl label apply --device "Soil sensor 3" --label haghs_ignore --yes
+hactl label apply --entity sensor.foo      --label haghs_ignore --yes
+
+# Bulk-apply from a noise allowlist YAML
+# (cberg `noise_allowlist.yaml` shape: flaky_zigbee_devices,
+#  flaky_iot_devices)
+hactl label apply --from-allowlist noise_allowlist.yaml \
+                  --label haghs_ignore --dry-run
+
+# Remove a label
+hactl label remove --device "Soil sensor 3" --label haghs_ignore --yes
+
+# Common flags
+[--dry-run] [--yes] [--limit N] [--audit PATH] [--quiet]
+```
+
+The `haghs_ignore` label is honoured by `hactl get zombie-devices`
+and `hactl doctor` (and by HAGHS) — labelled records drop out of
+every category. See [`docs/label.md`](docs/label.md) for the full
+SOP, allowlist YAML format, idempotency contract, and audit-log
+description.
+
 ### BATTERY - Monitoring Utilities (3 commands)
 
 ```bash
