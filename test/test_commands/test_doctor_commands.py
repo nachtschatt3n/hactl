@@ -213,6 +213,18 @@ class TestDoctorSingleCheck:
         assert result.exit_code == 0
         assert 'Automation Health' in result.output
 
+    def test_check_zombie_devices(self, mock_env_vars, mock_doctor_api,
+                                  monkeypatch):
+        # zombie_devices needs a websocket — mock it to return empty registries.
+        monkeypatch.setattr(
+            'hactl.handlers.doctor._fetch_registries',
+            lambda url, token: ([], []))
+        runner = CliRunner()
+        result = runner.invoke(cli, ['doctor', '--check', 'zombie_devices'])
+
+        assert result.exit_code == 0
+        assert 'Zombie Devices' in result.output
+
     def test_check_unknown(self, mock_env_vars, mock_doctor_api):
         runner = CliRunner()
         result = runner.invoke(cli, ['doctor', '--check', 'nonexistent'])
@@ -735,3 +747,293 @@ class TestDoctorHelp:
 
         assert result.exit_code == 0
         assert 'doctor' in result.output
+
+
+class TestDoctorZombieDevices:
+    """Test zombie-device check (orphan / stalled / disabled / restored)."""
+
+    def _run(self, monkeypatch, devices, entities, states,
+             mock_config_response, mock_check_config_response,
+             mock_error_log_response):
+        _make_doctor_api(monkeypatch, states, mock_config_response,
+                         mock_check_config_response, mock_error_log_response)
+        monkeypatch.setattr(
+            'hactl.handlers.doctor._fetch_registries',
+            lambda url, token: (devices, entities))
+        runner = CliRunner()
+        result = runner.invoke(
+            cli, ['doctor', '--check', 'zombie_devices', '--format', 'json'])
+        assert result.exit_code == 0
+        return json.loads(result.output)
+
+    def test_no_zombies_is_ok(self, mock_env_vars, monkeypatch,
+                              mock_config_response, mock_check_config_response,
+                              mock_error_log_response):
+        # 1 device with 1 healthy enabled entity, no restored states.
+        devices = [{'id': 'dev1', 'name': 'Healthy Device',
+                    'manufacturer': 'Acme', 'config_entries': ['ce1'],
+                    'disabled_by': None}]
+        entities = [{'entity_id': 'sensor.healthy', 'device_id': 'dev1',
+                     'disabled_by': None}]
+        states = [{'entity_id': 'sensor.healthy', 'state': '42',
+                   'attributes': {}, 'last_changed': '2025-01-01T00:00:00Z'}]
+        data = self._run(monkeypatch, devices, entities, states,
+                         mock_config_response, mock_check_config_response,
+                         mock_error_log_response)
+        findings = data['checks'][0]['findings']
+        assert all(f['status'] == 'ok' for f in findings)
+        assert any('No zombie' in f['message'] for f in findings)
+
+    def test_orphan_device_below_threshold_is_info(
+            self, mock_env_vars, monkeypatch,
+            mock_config_response, mock_check_config_response,
+            mock_error_log_response):
+        # 1 orphan device (no enabled entities).
+        devices = [{'id': 'dev1', 'name': 'Orphan',
+                    'manufacturer': 'Acme', 'config_entries': ['ce1'],
+                    'disabled_by': None}]
+        entities = []
+        states = []
+        data = self._run(monkeypatch, devices, entities, states,
+                         mock_config_response, mock_check_config_response,
+                         mock_error_log_response)
+        findings = data['checks'][0]['findings']
+        assert any('Orphan devices' in f['message'] and '1' in f['message']
+                   for f in findings)
+        # 1 orphan is well below the 25 threshold → INFO not WARNING.
+        warns = [f for f in findings if f['status'] == 'warning']
+        assert len(warns) == 0
+
+    def test_orphan_devices_above_threshold_is_warning(
+            self, mock_env_vars, monkeypatch,
+            mock_config_response, mock_check_config_response,
+            mock_error_log_response):
+        # 30 orphan devices (above the 25 default threshold).
+        devices = [{'id': f'dev{i}', 'name': f'Orphan {i}',
+                    'manufacturer': 'Acme', 'config_entries': ['ce1'],
+                    'disabled_by': None} for i in range(30)]
+        entities = []
+        states = []
+        data = self._run(monkeypatch, devices, entities, states,
+                         mock_config_response, mock_check_config_response,
+                         mock_error_log_response)
+        findings = data['checks'][0]['findings']
+        warn = [f for f in findings if f['status'] == 'warning'
+                and 'Orphan devices' in f['message']]
+        assert len(warn) == 1
+        assert '30' in warn[0]['message']
+
+    def test_top_n_truncation(
+            self, mock_env_vars, monkeypatch,
+            mock_config_response, mock_check_config_response,
+            mock_error_log_response):
+        # 50 orphans → only 5 example labels shown + a "and N more" line.
+        devices = [{'id': f'dev{i:02d}', 'name': f'Orphan{i}',
+                    'manufacturer': 'Acme', 'config_entries': ['ce1'],
+                    'disabled_by': None} for i in range(50)]
+        entities = []
+        states = []
+        data = self._run(monkeypatch, devices, entities, states,
+                         mock_config_response, mock_check_config_response,
+                         mock_error_log_response)
+        findings = data['checks'][0]['findings']
+        # Count info findings whose message starts with two leading spaces
+        # (those are the per-device example lines).
+        example_lines = [f for f in findings
+                         if f['message'].startswith('  Orphan')]
+        assert len(example_lines) == 5
+        assert any('and 45 more' in f['message'] for f in findings)
+
+    def test_stalled_device_detected(
+            self, mock_env_vars, monkeypatch,
+            mock_config_response, mock_check_config_response,
+            mock_error_log_response):
+        # Device has 2 enabled entities, both currently unavailable.
+        devices = [{'id': 'dev1', 'name': 'Dead Sensor',
+                    'manufacturer': 'Aqara', 'config_entries': ['ce1'],
+                    'disabled_by': None}]
+        entities = [
+            {'entity_id': 'sensor.dead_temp', 'device_id': 'dev1',
+             'disabled_by': None},
+            {'entity_id': 'sensor.dead_humidity', 'device_id': 'dev1',
+             'disabled_by': None},
+        ]
+        states = [
+            {'entity_id': 'sensor.dead_temp', 'state': 'unavailable',
+             'attributes': {}, 'last_changed': '2025-01-01T00:00:00Z'},
+            {'entity_id': 'sensor.dead_humidity', 'state': 'unavailable',
+             'attributes': {}, 'last_changed': '2025-01-01T00:00:00Z'},
+        ]
+        data = self._run(monkeypatch, devices, entities, states,
+                         mock_config_response, mock_check_config_response,
+                         mock_error_log_response)
+        findings = data['checks'][0]['findings']
+        assert any('Stalled devices' in f['message'] and '1' in f['message']
+                   for f in findings)
+        # Device label should appear in top-N example.
+        assert any('Dead Sensor' in f['message'] for f in findings)
+
+    def test_stalled_skipped_when_one_entity_alive(
+            self, mock_env_vars, monkeypatch,
+            mock_config_response, mock_check_config_response,
+            mock_error_log_response):
+        # One unavailable, one alive → NOT stalled.
+        devices = [{'id': 'dev1', 'name': 'Mixed',
+                    'manufacturer': 'Acme', 'config_entries': ['ce1'],
+                    'disabled_by': None}]
+        entities = [
+            {'entity_id': 'sensor.mixed_a', 'device_id': 'dev1',
+             'disabled_by': None},
+            {'entity_id': 'sensor.mixed_b', 'device_id': 'dev1',
+             'disabled_by': None},
+        ]
+        states = [
+            {'entity_id': 'sensor.mixed_a', 'state': 'unavailable',
+             'attributes': {}, 'last_changed': '2025-01-01T00:00:00Z'},
+            {'entity_id': 'sensor.mixed_b', 'state': '42',
+             'attributes': {}, 'last_changed': '2025-01-01T00:00:00Z'},
+        ]
+        data = self._run(monkeypatch, devices, entities, states,
+                         mock_config_response, mock_check_config_response,
+                         mock_error_log_response)
+        findings = data['checks'][0]['findings']
+        assert not any('Stalled devices' in f['message'] for f in findings)
+
+    def test_disabled_device_detected(
+            self, mock_env_vars, monkeypatch,
+            mock_config_response, mock_check_config_response,
+            mock_error_log_response):
+        devices = [{'id': 'dev1', 'name': 'Flic',
+                    'manufacturer': 'Flic', 'config_entries': ['ce1'],
+                    'disabled_by': 'user'}]
+        entities = []
+        states = []
+        data = self._run(monkeypatch, devices, entities, states,
+                         mock_config_response, mock_check_config_response,
+                         mock_error_log_response)
+        findings = data['checks'][0]['findings']
+        assert any('Disabled devices' in f['message'] for f in findings)
+        # Disabled is INFO regardless of count (user-controlled state).
+        warns = [f for f in findings if f['status'] == 'warning']
+        assert all('Disabled devices' not in f['message'] for f in warns)
+
+    def test_disabled_device_not_counted_as_orphan(
+            self, mock_env_vars, monkeypatch,
+            mock_config_response, mock_check_config_response,
+            mock_error_log_response):
+        # Disabled device with no enabled entities → counted as disabled,
+        # NOT orphan (we want to surface the actionable category).
+        devices = [{'id': 'dev1', 'name': 'Flic',
+                    'manufacturer': 'Flic', 'config_entries': ['ce1'],
+                    'disabled_by': 'user'}]
+        entities = []
+        states = []
+        data = self._run(monkeypatch, devices, entities, states,
+                         mock_config_response, mock_check_config_response,
+                         mock_error_log_response)
+        findings = data['checks'][0]['findings']
+        assert not any('Orphan devices' in f['message'] for f in findings)
+
+    def test_restored_entity_detected(
+            self, mock_env_vars, monkeypatch,
+            mock_config_response, mock_check_config_response,
+            mock_error_log_response):
+        devices = []
+        entities = []
+        states = [
+            {'entity_id': 'device_tracker.old_phone',
+             'state': 'unavailable',
+             'attributes': {'restored': True},
+             'last_changed': '2025-01-01T00:00:00Z'},
+        ]
+        data = self._run(monkeypatch, devices, entities, states,
+                         mock_config_response, mock_check_config_response,
+                         mock_error_log_response)
+        findings = data['checks'][0]['findings']
+        assert any('Restored entities' in f['message'] and '1' in f['message']
+                   for f in findings)
+        assert any('device_tracker.old_phone' in f['message']
+                   for f in findings)
+
+    def test_restored_entities_above_threshold_is_warning(
+            self, mock_env_vars, monkeypatch,
+            mock_config_response, mock_check_config_response,
+            mock_error_log_response):
+        devices = []
+        entities = []
+        states = [
+            {'entity_id': f'sensor.restored_{i}',
+             'state': 'unavailable',
+             'attributes': {'restored': True},
+             'last_changed': '2025-01-01T00:00:00Z'}
+            for i in range(60)
+        ]
+        data = self._run(monkeypatch, devices, entities, states,
+                         mock_config_response, mock_check_config_response,
+                         mock_error_log_response)
+        findings = data['checks'][0]['findings']
+        warn = [f for f in findings if f['status'] == 'warning'
+                and 'Restored entities' in f['message']]
+        assert len(warn) == 1
+        assert '60' in warn[0]['message']
+
+    def test_disabled_entities_make_device_orphan(
+            self, mock_env_vars, monkeypatch,
+            mock_config_response, mock_check_config_response,
+            mock_error_log_response):
+        # Device has entities but all are disabled_by set → orphan.
+        devices = [{'id': 'dev1', 'name': 'AllDisabled',
+                    'manufacturer': 'Acme', 'config_entries': ['ce1'],
+                    'disabled_by': None}]
+        entities = [
+            {'entity_id': 'sensor.x', 'device_id': 'dev1',
+             'disabled_by': 'user'},
+            {'entity_id': 'sensor.y', 'device_id': 'dev1',
+             'disabled_by': 'integration'},
+        ]
+        states = []
+        data = self._run(monkeypatch, devices, entities, states,
+                         mock_config_response, mock_check_config_response,
+                         mock_error_log_response)
+        findings = data['checks'][0]['findings']
+        assert any('Orphan devices' in f['message'] for f in findings)
+
+    def test_websocket_failure_emits_warning(
+            self, mock_env_vars, monkeypatch,
+            mock_config_response, mock_check_config_response,
+            mock_error_log_response):
+        # Simulate websocket failure → returns None.
+        _make_doctor_api(monkeypatch, [], mock_config_response,
+                         mock_check_config_response, mock_error_log_response)
+        monkeypatch.setattr(
+            'hactl.handlers.doctor._fetch_registries',
+            lambda url, token: None)
+        runner = CliRunner()
+        result = runner.invoke(
+            cli, ['doctor', '--check', 'zombie_devices', '--format', 'json'])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        findings = data['checks'][0]['findings']
+        assert any(f['status'] == 'warning'
+                   and 'websocket' in f['message'].lower()
+                   for f in findings)
+
+    def test_total_summary_line_present(
+            self, mock_env_vars, monkeypatch,
+            mock_config_response, mock_check_config_response,
+            mock_error_log_response):
+        devices = [
+            {'id': 'dev1', 'name': 'Orphan', 'manufacturer': 'Acme',
+             'config_entries': ['ce1'], 'disabled_by': None},
+        ]
+        entities = []
+        states = [
+            {'entity_id': 'sensor.r', 'state': 'unavailable',
+             'attributes': {'restored': True},
+             'last_changed': '2025-01-01T00:00:00Z'},
+        ]
+        data = self._run(monkeypatch, devices, entities, states,
+                         mock_config_response, mock_check_config_response,
+                         mock_error_log_response)
+        findings = data['checks'][0]['findings']
+        assert any('Total zombie items' in f['message'] for f in findings)

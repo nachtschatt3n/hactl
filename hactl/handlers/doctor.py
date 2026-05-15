@@ -9,6 +9,7 @@ import urllib.error
 from datetime import datetime, timezone
 import click
 from hactl.core import load_config, make_api_request
+from hactl.core.websocket import WebSocketClient
 
 
 # Domains that are inherently static and shouldn't be flagged as stale
@@ -540,6 +541,191 @@ def check_config_entries(hass_url, hass_token):
     return _check_result('Integrations', findings)
 
 
+# Threshold above which the per-category zombie count is escalated to WARN.
+# These are tuned to be permissive — most installs will accumulate some orphan
+# devices (failed pairings, replaced hardware) without operational impact.
+# The check is primarily a visibility tool, not a hard gate.
+ZOMBIE_DEVICE_WARN_THRESHOLD = 25
+ZOMBIE_RESTORED_ENTITY_WARN_THRESHOLD = 50
+ZOMBIE_TOP_N = 5
+
+
+def _fetch_registries(hass_url, hass_token):
+    """Pull device + entity registry over websocket. Returns (devices, entities) or None on failure."""
+    ws = WebSocketClient(hass_url, hass_token)
+    try:
+        ws.connect()
+        devices = ws.call('config/device_registry/list')
+        entities = ws.call('config/entity_registry/list')
+        ws.close()
+    except Exception:
+        try:
+            ws.close()
+        except Exception:
+            pass
+        return None
+    if not isinstance(devices, list) or not isinstance(entities, list):
+        return None
+    return devices, entities
+
+
+def check_zombie_devices(hass_url, hass_token, states):
+    """Identify zombie devices and zombie entities.
+
+    Three device-level categories and one entity-level category, all reported
+    as separate sub-counts in a single section:
+
+      1. Orphan devices       — device has zero enabled entities (entities
+                                may exist but all are disabled_by set, or
+                                no entities at all).
+      2. Stalled devices      — device has enabled entities, but ALL of them
+                                are currently 'unavailable' or 'unknown'.
+                                Strong signal the underlying device is gone.
+      3. Disabled devices     — device.disabled_by is set (user or
+                                integration disabled the whole device).
+      4. Restored entities    — entity's state attributes contain
+                                'restored: true', meaning HA loaded the
+                                state from history because the integration
+                                no longer provides this entity. Most
+                                commonly seen on device_tracker / sensor
+                                from removed integrations.
+
+    Categories 2 and 3 can overlap, and (1) is reported strictly
+    (no enabled entities at all). Top-N example per category is shown.
+    Total count is the sum across all four categories (with overlap kept,
+    matching what users see when scanning HA's Devices page + Watchman).
+    """
+    registries = _fetch_registries(hass_url, hass_token)
+    if registries is None:
+        return _check_result('Zombie Devices', [
+            _finding('warning', 'Could not fetch device/entity registry over websocket')
+        ])
+
+    devices, entities = registries
+    state_by_eid = {s.get('entity_id', ''): s for s in (states or [])}
+
+    # Build device -> enabled-entities map
+    enabled_entities_by_device = {}
+    for e in entities:
+        did = e.get('device_id')
+        if not did:
+            continue
+        if e.get('disabled_by'):
+            continue
+        enabled_entities_by_device.setdefault(did, []).append(e)
+
+    orphans = []
+    stalled = []
+    disabled_devs = []
+
+    for d in devices:
+        did = d.get('id')
+        if not did:
+            continue
+        ents = enabled_entities_by_device.get(did, [])
+
+        if d.get('disabled_by'):
+            disabled_devs.append(d)
+            continue
+
+        if not ents:
+            orphans.append(d)
+            continue
+
+        # Stalled: all enabled entities currently unavailable/unknown
+        all_dead = True
+        any_with_state = False
+        for e in ents:
+            s = state_by_eid.get(e.get('entity_id', ''))
+            if not s:
+                continue
+            any_with_state = True
+            if s.get('state') not in ('unavailable', 'unknown'):
+                all_dead = False
+                break
+        if any_with_state and all_dead:
+            stalled.append(d)
+
+    # Restored entities (state.attributes.restored == True). Integration is
+    # no longer providing this entity; HA is keeping it from history.
+    restored_entities = []
+    for s in (states or []):
+        if s.get('attributes', {}).get('restored'):
+            restored_entities.append(s)
+
+    findings = []
+    total = len(orphans) + len(stalled) + len(disabled_devs) + len(restored_entities)
+
+    def _device_label(d):
+        name = d.get('name_by_user') or d.get('name') or '?'
+        did = d.get('id', '') or ''
+        domain = '?'
+        ces = d.get('config_entries') or []
+        if ces:
+            # config_entries is a list of entry_ids; we don't have the
+            # mapping here, so fall back to manufacturer for context.
+            domain = d.get('manufacturer') or d.get('model') or '?'
+        return f"{name} (id={did[:8]}, integration={domain})"
+
+    def _entity_label(s):
+        eid = s.get('entity_id', '?')
+        domain = eid.split('.')[0] if '.' in eid else '?'
+        return f"{eid} (integration={domain})"
+
+    # Orphans
+    if orphans:
+        sev = 'warning' if len(orphans) > ZOMBIE_DEVICE_WARN_THRESHOLD else 'info'
+        findings.append(_finding(sev,
+            f"Orphan devices (no enabled entities): {len(orphans)}"))
+        for d in orphans[:ZOMBIE_TOP_N]:
+            findings.append(_finding('info', f"  {_device_label(d)}"))
+        if len(orphans) > ZOMBIE_TOP_N:
+            findings.append(_finding('info',
+                f"  ... and {len(orphans) - ZOMBIE_TOP_N} more"))
+
+    # Stalled
+    if stalled:
+        sev = 'warning' if len(stalled) > ZOMBIE_DEVICE_WARN_THRESHOLD else 'info'
+        findings.append(_finding(sev,
+            f"Stalled devices (all entities unavailable): {len(stalled)}"))
+        for d in stalled[:ZOMBIE_TOP_N]:
+            findings.append(_finding('info', f"  {_device_label(d)}"))
+        if len(stalled) > ZOMBIE_TOP_N:
+            findings.append(_finding('info',
+                f"  ... and {len(stalled) - ZOMBIE_TOP_N} more"))
+
+    # Disabled
+    if disabled_devs:
+        findings.append(_finding('info',
+            f"Disabled devices (user/integration disabled): {len(disabled_devs)}"))
+        for d in disabled_devs[:ZOMBIE_TOP_N]:
+            findings.append(_finding('info', f"  {_device_label(d)}"))
+        if len(disabled_devs) > ZOMBIE_TOP_N:
+            findings.append(_finding('info',
+                f"  ... and {len(disabled_devs) - ZOMBIE_TOP_N} more"))
+
+    # Restored entities
+    if restored_entities:
+        sev = 'warning' if len(restored_entities) > ZOMBIE_RESTORED_ENTITY_WARN_THRESHOLD else 'info'
+        findings.append(_finding(sev,
+            f"Restored entities (integration no longer provides them): {len(restored_entities)}"))
+        for s in restored_entities[:ZOMBIE_TOP_N]:
+            findings.append(_finding('info', f"  {_entity_label(s)}"))
+        if len(restored_entities) > ZOMBIE_TOP_N:
+            findings.append(_finding('info',
+                f"  ... and {len(restored_entities) - ZOMBIE_TOP_N} more"))
+
+    if not findings:
+        findings.append(_finding('ok', 'No zombie devices or entities detected'))
+    else:
+        findings.append(_finding('info',
+            f"Total zombie items: {total} ({len(orphans)} orphan + "
+            f"{len(stalled)} stalled + {len(disabled_devs)} disabled + "
+            f"{len(restored_entities)} restored entities)"))
+
+    return _check_result('Zombie Devices', findings)
+
+
 def check_automations(states):
     """Check automation health."""
     now = datetime.now(timezone.utc)
@@ -595,7 +781,7 @@ SEVERITY_LABELS = {
 ALL_CHECKS = [
     'api', 'unavailable', 'batteries', 'error_log', 'config',
     'stale', 'version', 'config_entries', 'entity_availability',
-    'automations',
+    'zombie_devices', 'automations',
 ]
 
 
@@ -611,7 +797,7 @@ def run_doctor(format_type='table', check_name=None):
 
     # Fetch states once if needed by any check
     states = None
-    needs_states = {'unavailable', 'batteries', 'stale', 'entity_availability', 'automations'}
+    needs_states = {'unavailable', 'batteries', 'stale', 'entity_availability', 'automations', 'zombie_devices'}
     if needs_states & set(checks_to_run):
         try:
             states = make_api_request(f"{HASS_URL}/api/states", HASS_TOKEN)
@@ -646,6 +832,8 @@ def run_doctor(format_type='table', check_name=None):
             results.append(check_config_entries(HASS_URL, HASS_TOKEN))
         elif name == 'entity_availability':
             results.append(check_entity_availability_by_domain(states))
+        elif name == 'zombie_devices':
+            results.append(check_zombie_devices(HASS_URL, HASS_TOKEN, states))
         elif name == 'automations':
             results.append(check_automations(states))
 
