@@ -119,8 +119,9 @@ hactl get integrations               # Configured integrations
 hactl get automations                # All automations
 hactl get dashboards                 # All dashboards
 hactl get services                   # Available services
+hactl get zombie-devices             # Triage orphans / stalled / disabled / restored entities
 
-# And 21 more commands for scenes, scripts, helpers, calendars, etc.
+# And 20 more commands for scenes, scripts, helpers, calendars, etc.
 ```
 
 **Supported sensor types:** battery, temperature, humidity, co2, power, energy, pressure, motion, etc.
@@ -352,6 +353,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 - **[CLAUDE.md](CLAUDE.md)** - Detailed technical documentation for AI assistants and developers
 - **[test/README.md](test/README.md)** - Test suite documentation
+- **[docs/get-zombie-devices.md](docs/get-zombie-devices.md)** - Triage workflow for `hactl get zombie-devices`
 
 ---
 

@@ -569,6 +569,82 @@ def _fetch_registries(hass_url, hass_token):
     return devices, entities
 
 
+def classify_zombies(devices, entities, states):
+    """Pure classification of zombie devices and entities.
+
+    Inputs:
+      - devices:  device-registry list (config/device_registry/list)
+      - entities: entity-registry list (config/entity_registry/list)
+      - states:   /api/states list (or None)
+
+    Returns a dict:
+      {
+        'orphans':            [device, ...],   # no enabled entities at all
+        'stalled':            [device, ...],   # all enabled entities unavailable/unknown
+        'disabled':           [device, ...],   # device.disabled_by is set
+        'restored_entities':  [state, ...],    # state.attributes.restored == True
+      }
+
+    A device is classified into exactly one of orphans/stalled/disabled
+    (disabled wins, then orphan, then stalled). Restored entities are
+    independent — they may or may not link to a device.
+    """
+    state_by_eid = {s.get('entity_id', ''): s for s in (states or [])}
+
+    enabled_entities_by_device = {}
+    for e in (entities or []):
+        did = e.get('device_id')
+        if not did:
+            continue
+        if e.get('disabled_by'):
+            continue
+        enabled_entities_by_device.setdefault(did, []).append(e)
+
+    orphans = []
+    stalled = []
+    disabled_devs = []
+
+    for d in (devices or []):
+        did = d.get('id')
+        if not did:
+            continue
+        ents = enabled_entities_by_device.get(did, [])
+
+        if d.get('disabled_by'):
+            disabled_devs.append(d)
+            continue
+
+        if not ents:
+            orphans.append(d)
+            continue
+
+        # Stalled: all enabled entities currently unavailable/unknown
+        all_dead = True
+        any_with_state = False
+        for e in ents:
+            s = state_by_eid.get(e.get('entity_id', ''))
+            if not s:
+                continue
+            any_with_state = True
+            if s.get('state') not in ('unavailable', 'unknown'):
+                all_dead = False
+                break
+        if any_with_state and all_dead:
+            stalled.append(d)
+
+    restored_entities = []
+    for s in (states or []):
+        if s.get('attributes', {}).get('restored'):
+            restored_entities.append(s)
+
+    return {
+        'orphans': orphans,
+        'stalled': stalled,
+        'disabled': disabled_devs,
+        'restored_entities': restored_entities,
+    }
+
+
 def check_zombie_devices(hass_url, hass_token, states):
     """Identify zombie devices and zombie entities.
 
@@ -602,56 +678,11 @@ def check_zombie_devices(hass_url, hass_token, states):
         ])
 
     devices, entities = registries
-    state_by_eid = {s.get('entity_id', ''): s for s in (states or [])}
-
-    # Build device -> enabled-entities map
-    enabled_entities_by_device = {}
-    for e in entities:
-        did = e.get('device_id')
-        if not did:
-            continue
-        if e.get('disabled_by'):
-            continue
-        enabled_entities_by_device.setdefault(did, []).append(e)
-
-    orphans = []
-    stalled = []
-    disabled_devs = []
-
-    for d in devices:
-        did = d.get('id')
-        if not did:
-            continue
-        ents = enabled_entities_by_device.get(did, [])
-
-        if d.get('disabled_by'):
-            disabled_devs.append(d)
-            continue
-
-        if not ents:
-            orphans.append(d)
-            continue
-
-        # Stalled: all enabled entities currently unavailable/unknown
-        all_dead = True
-        any_with_state = False
-        for e in ents:
-            s = state_by_eid.get(e.get('entity_id', ''))
-            if not s:
-                continue
-            any_with_state = True
-            if s.get('state') not in ('unavailable', 'unknown'):
-                all_dead = False
-                break
-        if any_with_state and all_dead:
-            stalled.append(d)
-
-    # Restored entities (state.attributes.restored == True). Integration is
-    # no longer providing this entity; HA is keeping it from history.
-    restored_entities = []
-    for s in (states or []):
-        if s.get('attributes', {}).get('restored'):
-            restored_entities.append(s)
+    classified = classify_zombies(devices, entities, states)
+    orphans = classified['orphans']
+    stalled = classified['stalled']
+    disabled_devs = classified['disabled']
+    restored_entities = classified['restored_entities']
 
     findings = []
     total = len(orphans) + len(stalled) + len(disabled_devs) + len(restored_entities)
