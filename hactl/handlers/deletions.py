@@ -52,7 +52,14 @@ VALID_KINDS = (KIND_DEVICE, KIND_ENTITY, KIND_CONFIG_ENTRY)
 # Safety / behaviour defaults.
 DEFAULT_LIMIT = 50
 RECENT_ACTIVITY_WINDOW_DAYS = 7
-DEAD_STATES = frozenset(('unavailable', 'unknown', '', None))
+DEAD_STATES = frozenset(('unavailable', 'unknown', 'unknown_state', '', None))
+
+# Origin tags for the safety driver: tells us whether the entity was
+# named explicitly (singular) or matched by a filter (bulk). The
+# live-state predicate hard-refuses the bulk form and prompts y/N for
+# the singular form. See safety_check_entity_live_state.
+ORIGIN_SINGULAR = 'singular'
+ORIGIN_BULK = 'bulk'
 
 
 # ---------------------------------------------------------------------------
@@ -291,6 +298,34 @@ def filter_entities(data: dict, filters: dict[str, str]) -> list[dict]:
     return ents
 
 
+def apply_state_only_filter(entities: list[dict], data: dict,
+                            wanted: str) -> list[dict]:
+    """Keep only entities whose current state matches ``wanted``.
+
+    Recommended safe pattern for zombie cleanup:
+    ``hactl delete entities --filter platform=foo --state-only unavailable``.
+    Anything live falls out before the safety predicate ever sees it.
+    """
+    if not wanted:
+        return entities
+    state_by_eid = {s.get('entity_id'): s for s in data.get('states') or []}
+    if wanted == 'unavailable':
+        targets = ('unavailable', 'unknown')
+    else:
+        targets = (wanted,)
+    out = []
+    for e in entities:
+        s = state_by_eid.get(e.get('entity_id'))
+        if not s:
+            # No state at all → treat as unavailable for filter purposes.
+            if 'unavailable' in targets:
+                out.append(e)
+            continue
+        if s.get('state') in targets:
+            out.append(e)
+    return out
+
+
 def filter_config_entries(data: dict, filters: dict[str, str]) -> list[dict]:
     """Apply filters to config_entries.
 
@@ -399,6 +434,36 @@ def safety_check_entity(
             f"parent config_entry is 'loaded' and entity {eid} had "
             f"non-dead state in last {RECENT_ACTIVITY_WINDOW_DAYS}d")
     return True, None
+
+
+def safety_check_entity_live_state(
+        entity: dict, data: dict) -> tuple[bool, str | None]:
+    """Refuse if the entity has a live (non-dead) reportable state.
+
+    Lifeline against pattern-based bulk deletes. Lesson: a delete-by-
+    pattern run caught ``sensor.andreas_iphone_12_pro_battery_level`` —
+    a working sensor with state ``100`` — and removed it because the
+    pattern matched. This predicate flags any entity whose CURRENT
+    state is real (not in DEAD_STATES). The driver then either hard-
+    refuses (bulk) or prompts y/N (singular).
+
+    Returns (ok_to_delete, reason_if_blocked). The caller decides how
+    to surface the refusal; this function never raises.
+    """
+    eid = entity.get('entity_id') or '-'
+    state_by_eid = {s.get('entity_id'): s for s in data.get('states') or []}
+    s = state_by_eid.get(eid)
+    if not s:
+        return True, None
+    state_val = s.get('state')
+    if state_val in DEAD_STATES:
+        return True, None
+    return False, (
+        f"REFUSED: entity {eid!r} has live state {state_val!r} "
+        "(not unavailable/unknown).\n"
+        "Deleting an entity with active state usually means you're "
+        "deleting a working sensor.\n"
+        "If you really want to delete it, pass --force.")
 
 
 def safety_check_config_entry(
@@ -548,6 +613,7 @@ def run_delete(  # noqa: C901 — driver, intentional length
         audit_path: str | None,
         quiet: bool,
         invocation: list[str],
+        origin: str = ORIGIN_SINGULAR,
 ) -> int:
     """Execute (or dry-run) a deletion batch.
 
@@ -594,6 +660,55 @@ def run_delete(  # noqa: C901 — driver, intentional length
         raise click.ClickException(
             f"batch size {len(records)} exceeds --limit {limit}. "
             "Re-run with --force to override or pass --limit N.")
+
+    # Live-state predicate (lifeline against pattern-based bulk
+    # deletes catching working sensors). Singular form prompts y/N
+    # (operator named the resource by id, this is friction not refusal).
+    # Bulk form hard-refuses without --force.
+    if not force:
+        live_blocked: list[tuple[dict, str]] = []
+        live_prompts: list[tuple[dict, str]] = []
+        for r in records:
+            if r['kind'] != KIND_ENTITY:
+                continue
+            ok, why = safety_check_entity_live_state(r['pre_state'], data)
+            if ok:
+                continue
+            if origin == ORIGIN_SINGULAR:
+                live_prompts.append((r, why or 'live state'))
+            else:
+                live_blocked.append((r, why or 'live state'))
+
+        if live_blocked:
+            click.secho(
+                f"Refusing to delete {len(live_blocked)} entity(s) with "
+                "live state in a bulk operation:",
+                fg='red', err=True)
+            for _r, why in live_blocked:
+                click.secho(f"  {why}", fg='red', err=True)
+            click.secho(
+                "Bulk delete refused. Re-run with --force to override, "
+                "or narrow the filter (try --state-only unavailable).",
+                fg='red', err=True)
+            blocked_ids = {(r['kind'], r['id']) for r, _ in live_blocked}
+            records = [r for r in records
+                       if (r['kind'], r['id']) not in blocked_ids]
+
+        # Singular y/N prompt — only matters if we're actually about to
+        # commit (--yes) and not a dry-run.
+        if live_prompts and yes and not dry_run:
+            for r, why in live_prompts:
+                click.secho(why, fg='yellow', err=True)
+                if not click.confirm('Proceed with delete?', default=False):
+                    click.secho(f"  skipped: {r['kind']} {r['id']}",
+                                fg='yellow')
+                    records = [x for x in records
+                               if (x['kind'], x['id']) != (r['kind'], r['id'])]
+        elif live_prompts:
+            # In dry-run / no-yes mode, just surface the warning so the
+            # operator sees it before running for real.
+            for _r, why in live_prompts:
+                click.secho(why, fg='yellow', err=True)
 
     # Safety predicate.
     blocked: list[tuple[dict, str]] = []

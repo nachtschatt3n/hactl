@@ -108,6 +108,7 @@ def delete_group(ctx, from_file, dry_run, yes, limit, force,
         audit_path=audit_path,
         quiet=quiet,
         invocation=sys.argv,
+        origin=deletions.ORIGIN_BULK,
     )
     ctx.exit(rc)
 
@@ -204,6 +205,7 @@ def delete_devices(ctx, filter_strs, dry_run, yes, limit, force,
     rc = deletions.run_delete(
         targets, dry_run=dry_run, yes=yes, force=force, limit=limit,
         audit_path=audit_path, quiet=quiet, invocation=sys.argv,
+        origin=deletions.ORIGIN_BULK,
     )
     ctx.exit(rc)
 
@@ -213,26 +215,36 @@ def delete_devices(ctx, filter_strs, dry_run, yes, limit, force,
               help='key=value filter (repeatable). '
                    'Keys: platform, domain, disabled_by, device_id, '
                    'restored.')
+@click.option('--state-only', 'state_only', default=None,
+              help='Only delete entities currently in this state '
+                   '(e.g. unavailable). Recommended safe pattern for '
+                   'zombie cleanup — drops live entities before any '
+                   'API call.')
 @_common_opts
 @click.pass_context
-def delete_entities(ctx, filter_strs, dry_run, yes, limit, force,
+def delete_entities(ctx, filter_strs, state_only, dry_run, yes, limit, force,
                     audit_path, quiet):
     """Bulk-delete entities matching --filter expressions.
 
     \b
         hactl delete entities --filter platform=tibber_prices --dry-run
         hactl delete entities --filter domain=sensor --filter restored=true
+        hactl delete entities --filter platform=mobile_app \\
+                              --state-only unavailable --dry-run
     """
     from hactl.core import load_config
     HASS_URL, HASS_TOKEN = load_config()
     data = deletions.fetch_registries(HASS_URL, HASS_TOKEN)
     filters = deletions.parse_filters(filter_strs)
     matched = deletions.filter_entities(data, filters)
+    if state_only:
+        matched = deletions.apply_state_only_filter(matched, data, state_only)
     targets = [(deletions.KIND_ENTITY, e.get('entity_id'))
                for e in matched if e.get('entity_id')]
     rc = deletions.run_delete(
         targets, dry_run=dry_run, yes=yes, force=force, limit=limit,
         audit_path=audit_path, quiet=quiet, invocation=sys.argv,
+        origin=deletions.ORIGIN_BULK,
     )
     ctx.exit(rc)
 
@@ -261,5 +273,6 @@ def delete_config_entries(ctx, filter_strs, dry_run, yes, limit, force,
     rc = deletions.run_delete(
         targets, dry_run=dry_run, yes=yes, force=force, limit=limit,
         audit_path=audit_path, quiet=quiet, invocation=sys.argv,
+        origin=deletions.ORIGIN_BULK,
     )
     ctx.exit(rc)

@@ -12,8 +12,9 @@ Home Assistant. Removing devices is still a manual UI action.
 
 ```
 hactl get zombie-devices [-o table|json|csv|yaml]
-                         [--category orphan|stalled|disabled|restored]
+                         [--category orphan|stalled|disabled|restored|unavailable_entity]
                          [--no-truncate]
+                         [--ignore-label LABEL]
 ```
 
 | Flag | Default | Meaning |
@@ -21,10 +22,11 @@ hactl get zombie-devices [-o table|json|csv|yaml]
 | `-o`, `-f`, `--format` | `table` | Output format. `json`/`csv` dump every record (no truncation). |
 | `--category` | (all) | Filter to one category. `restored` is shorthand for `restored_entity`. |
 | `--no-truncate` | off | Table mode: dump every row instead of the top-20-per-category default. |
+| `--ignore-label` | `haghs_ignore` (env `HACTL_IGNORE_LABEL`) | Entity OR its parent device carrying this label is skipped from every category. Cross-tool compatible with HAGHS. |
 
 ## What's a zombie device?
 
-There are four categories. Treat the question as: **"should I keep this
+There are five categories. Treat the question as: **"should I keep this
 or remove it?"**
 
 - **Orphan** — Device is in the registry but has zero enabled entities
@@ -44,6 +46,29 @@ or remove it?"**
   longer providing it. Most common after removing an integration without
   cleaning up its entities. The `platform` field tells you which
   integration *used* to own it.
+- **Unavailable entity** *(HAGHS-parity)* — A *single* entity in
+  `unavailable` or `unknown` state for more than **15 minutes** on an
+  otherwise-healthy device. Catches the cases the device-level checks
+  miss: e.g. an iPhone Companion App where Focus / Steps / Distance /
+  Floors are individually broken even though the parent device is
+  online and other sensors report fine. The detection is restricted
+  to "real signal" domains (`sensor`, `binary_sensor`, `switch`,
+  `light`, `fan`, `climate`, `media_player`, `vacuum`, `camera`) so
+  that buttons / events / scenes don't generate false positives.
+  Sorted stalest-first in the table (longest `unavailable_for_seconds`
+  on top — most likely to be true zombies).
+
+### Grace period and ignore-label
+
+- **15-minute grace window** is hard-coded (matches HAGHS). An entity
+  must have been `unavailable`/`unknown` for that long before the
+  `unavailable_entity` bucket flags it. This tolerates HA restarts and
+  brief integration reloads.
+- **Ignore label**: `haghs_ignore` by default (override via
+  `--ignore-label LABEL` or env `HACTL_IGNORE_LABEL`). Any entity OR its
+  parent device that carries the label in its registry `labels` list is
+  skipped from EVERY zombie category. This gives you a per-record opt-
+  out without code changes — and it's cross-tool compatible with HAGHS.
 
 ## Triage workflow
 
@@ -102,6 +127,35 @@ hactl get zombie-devices -o json --category orphan \
 hactl get zombie-devices -o json --category orphan \
   | hactl delete -f - --yes --limit 200
 ```
+
+### Recommended pattern for `unavailable_entity` cleanup
+
+Because `unavailable_entity` records are *individual* entities (not
+devices), the safe sequence is:
+
+```bash
+# 1. Inspect grouped by integration so you can see the cluster shape.
+hactl get zombie-devices -o json --category unavailable_entity \
+  | jq 'group_by(.integration)
+        | map({integration: .[0].integration, count: length})
+        | sort_by(-.count)'
+
+# 2. Use --state-only unavailable on `hactl delete entities` so live
+#    entities are filtered out BEFORE the safety predicate ever sees
+#    them. This is the recommended safe pattern.
+hactl delete entities --filter platform=mobile_app \
+                      --state-only unavailable --dry-run
+
+# 3. Commit.
+hactl delete entities --filter platform=mobile_app \
+                      --state-only unavailable --yes --limit 200
+```
+
+Never run `hactl delete entities --filter platform=X` *without*
+`--state-only unavailable` unless you've manually verified every match.
+The pattern alone will catch any working sensor on the same platform.
+The bulk-form safety predicate hard-refuses live-state entities without
+`--force` — see [`docs/delete.md`](delete.md).
 
 See [`docs/delete.md`](delete.md) for the full deletion SOP, the
 safety predicate, and the audit-log shape.

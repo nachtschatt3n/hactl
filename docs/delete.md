@@ -22,8 +22,14 @@ manifest form (`-f file.json` or `-f -` from stdin).
    parent `config_entry.state == 'loaded'` AND the target entity has had
    any non-dead state in the last 7 days, or when the target device is
    `disabled_by` set (intentional disablement is not garbage).
-4. **`--limit` cap** (default 50) bounds bulk batches. `--force`
-   bypasses both the limit and the safety predicate.
+4. **Live-state predicate** (entity-level) refuses (without `--force`)
+   when the entity's CURRENT state is not in `('unavailable', 'unknown',
+   None)` — i.e., it's a working sensor. Bulk forms HARD-REFUSE the
+   live record and continue with the rest. Singular form (the operator
+   named the entity by id) instead prompts y/N. See *The
+   iPhone-12-Pro lesson* below.
+5. **`--limit` cap** (default 50) bounds bulk batches. `--force`
+   bypasses every safety predicate (including live-state) AND the limit.
 
 ## Synopsis
 
@@ -62,7 +68,7 @@ scope** for this PR.
 | Resource | Supported `--filter` keys |
 |----------|----------------------------|
 | `devices` | `category={orphan,stalled,disabled}`, `integration=<domain>`, `manufacturer=<substr>`, `area=<id>`, `disabled_by=<value\|none>` |
-| `entities` | `platform=<str>`, `domain=<sensor\|binary_sensor\|...>`, `disabled_by=<value\|none>`, `device_id=<id>`, `restored=true` |
+| `entities` | `platform=<str>`, `domain=<sensor\|binary_sensor\|...>`, `disabled_by=<value\|none>`, `device_id=<id>`, `restored=true` (plus `--state-only unavailable` flag for the recommended zombie-cleanup pattern) |
 | `config-entries` | `state=<loaded\|not_loaded\|...>`, `domain=<str>`, `source=<user\|integration_discovery\|...>` |
 
 Multiple `--filter` flags are AND-combined.
@@ -124,6 +130,51 @@ config-entry delete cascades to dozens of dead devices+entities.
 hactl delete entities --filter platform=tibber_prices --dry-run
 hactl delete entities --filter platform=tibber_prices --yes --limit 100
 ```
+
+### 3b. Zombie entity cleanup with `--state-only unavailable` (recommended)
+
+For the new HAGHS-parity `unavailable_entity` category, the safe path
+filters out live entities BEFORE the safety predicate ever sees them:
+
+```bash
+hactl delete entities --filter platform=mobile_app \
+                      --state-only unavailable --dry-run
+hactl delete entities --filter platform=mobile_app \
+                      --state-only unavailable --yes --limit 200
+```
+
+This is strictly safer than `--force` for the common
+"delete-zombies-by-pattern" workflow: `--state-only unavailable` drops
+live entities at filter time, so the audit log only contains records
+that were genuinely dead.
+
+## The iPhone-12-Pro lesson (and why the live-state predicate exists)
+
+A real incident: a bulk delete keyed on `platform=mobile_app` caught
+`sensor.andreas_iphone_12_pro_battery_level` — an active sensor
+reporting `100` — and removed it because the pattern matched. There was
+no signal in the pattern that distinguished the live sensor from the
+dead ones around it.
+
+The live-state predicate now refuses that exact mistake:
+
+```text
+$ hactl delete entity sensor.andreas_iphone_12_pro_battery_level --dry-run
+REFUSED: entity 'sensor.andreas_iphone_12_pro_battery_level' has live state '100' (not unavailable/unknown).
+Deleting an entity with active state usually means you're deleting a working sensor.
+If you really want to delete it, pass --force.
+```
+
+Three rules to internalise:
+
+1. **Never delete an entity by pattern alone.** Always pair `--filter`
+   with `--state-only unavailable` (or with `--category orphan` /
+   `--category stalled` on the device-level forms).
+2. **The singular form gets a y/N prompt** — you named the resource by
+   id, so the operator-friction model is "remind, don't refuse".
+3. **`--force` exists** for the rare case where you really do want to
+   delete a working sensor (e.g. you're replacing the device and need
+   the old entity_id to free up). The audit log is still written.
 
 ### 4. Targeted single-record delete
 
@@ -203,6 +254,15 @@ no undelete API. If you deleted the wrong thing:
 
 ## Troubleshooting
 
+- **"REFUSED: entity 'X' has live state 'Y'"** — Live-state predicate
+  triggered. The entity is currently reporting a real value, not
+  `unavailable`/`unknown`. Either re-target by id with `--state-only
+  unavailable`, narrow the filter, or pass `--force` if you really do
+  want to delete a working sensor.
+- **"Refusing to delete N entity(s) with live state in a bulk
+  operation"** — Same predicate, bulk path. The live records are
+  dropped from the plan; the rest proceed. To include them, add
+  `--force` (audit still written).
 - **"safety predicate blocked N record(s)"** — Targets had recent
   activity on a loaded integration. Re-check why you're deleting them;
   if you really mean it, add `--force`.

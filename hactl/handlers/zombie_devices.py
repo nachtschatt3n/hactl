@@ -20,15 +20,23 @@ Read-only. Removing devices is a manual UI action.
 import csv
 import io
 import json
+import os
 import sys
+from datetime import datetime, timezone
+
 import click
 
 from hactl.core import load_config, make_api_request
 from hactl.core.websocket import WebSocketClient
-from hactl.handlers.doctor import classify_zombies
+from hactl.handlers.doctor import (
+    DEFAULT_IGNORE_LABEL,
+    _parse_iso_ts,
+    classify_zombies,
+)
 
 
-CATEGORIES = ('orphan', 'stalled', 'disabled', 'restored_entity')
+CATEGORIES = ('orphan', 'stalled', 'disabled', 'restored_entity',
+              'unavailable_entity')
 
 # Per-category truncation cap for table view (use --no-truncate to dump all).
 TABLE_TOP_N = 20
@@ -187,6 +195,79 @@ def _device_record(device, category, lookups):
         'entity_id': None,
         'platform': None,
         'friendly_name': None,
+        'state': None,
+        'last_changed': None,
+        'unavailable_for_seconds': None,
+        'device_name': name,
+    }
+
+
+def _unavailable_entity_record(state, ent_reg, dev_reg, lookups, now):
+    """Build a triage record for an individually-unavailable entity.
+
+    Mirrors the `restored_entity` schema with two extra fields:
+    - `state`: the actual reported state ('unavailable' or 'unknown')
+    - `unavailable_for_seconds`: how long the entity has been in that
+      state (now - last_changed). Used to sort the table view so the
+      stalest entries surface first.
+    """
+    eid = state.get('entity_id') or ''
+    attrs = state.get('attributes') or {}
+    reg = ent_reg or {}
+    did = reg.get('device_id') or None
+    platform = reg.get('platform') or None
+
+    # device > entity area
+    area = None
+    if dev_reg:
+        device_area_id = dev_reg.get('area_id')
+        if device_area_id:
+            area = lookups['area_by_id'].get(device_area_id)
+    if not area:
+        ent_area = reg.get('area_id')
+        if ent_area:
+            area = lookups['area_by_id'].get(ent_area)
+
+    last_changed = state.get('last_changed') or state.get('last_updated')
+    last_dt = _parse_iso_ts(last_changed)
+    unavailable_for = None
+    if last_dt is not None:
+        unavailable_for = int((now - last_dt).total_seconds())
+
+    # Integration: prefer the entity registry's config_entry → domain map,
+    # then fall back to its `platform` (which is what HA shows in the UI).
+    integration = None
+    ce_id = reg.get('config_entry_id')
+    if ce_id:
+        integration = lookups['domain_by_entry'].get(ce_id)
+    if not integration:
+        integration = platform
+
+    via_device_id = (dev_reg or {}).get('via_device_id')
+
+    return {
+        'category': 'unavailable_entity',
+        'device_id': did,
+        'name': attrs.get('friendly_name') or eid,
+        'area': area,
+        'integration': integration,
+        'manufacturer': (dev_reg or {}).get('manufacturer'),
+        'model': (dev_reg or {}).get('model'),
+        'sw_version': (dev_reg or {}).get('sw_version'),
+        'hw_version': (dev_reg or {}).get('hw_version'),
+        'via_device_id': via_device_id,
+        'disabled_by': reg.get('disabled_by'),
+        'entities_enabled': None,
+        'entities_disabled': None,
+        'last_seen': last_changed,
+        'entity_id': eid,
+        'platform': platform,
+        'friendly_name': attrs.get('friendly_name'),
+        'state': state.get('state'),
+        'last_changed': last_changed,
+        'unavailable_for_seconds': unavailable_for,
+        'device_name': (dev_reg or {}).get('name_by_user')
+                        or (dev_reg or {}).get('name'),
     }
 
 
@@ -234,11 +315,17 @@ def _restored_entity_record(state, lookups):
         'entity_id': eid,
         'platform': platform,
         'friendly_name': attrs.get('friendly_name'),
+        'state': None,
+        'last_changed': last_seen,
+        'unavailable_for_seconds': None,
+        'device_name': None,
     }
 
 
-def _build_records(data, classified, category_filter=None):
+def _build_records(data, classified, category_filter=None, now=None):
     """Produce the full list of enriched triage records, filtered by category."""
+    if now is None:
+        now = datetime.now(timezone.utc)
     lookups = _build_lookups(data)
     # stash devices for restored-entity area lookup
     lookups['_devices'] = data['devices']
@@ -256,6 +343,19 @@ def _build_records(data, classified, category_filter=None):
     if category_filter in (None, 'restored', 'restored_entity'):
         for s in classified['restored_entities']:
             records.append(_restored_entity_record(s, lookups))
+    if category_filter in (None, 'unavailable_entity'):
+        for tup in classified.get('unavailable_entities', []):
+            s, ent_reg, dev_reg = tup
+            records.append(
+                _unavailable_entity_record(s, ent_reg, dev_reg, lookups, now))
+
+    # Default sort: unavailable_entity by stalest first; everything else
+    # keeps registry-order (already category-grouped at print time).
+    records.sort(key=lambda r: (
+        0 if r.get('category') == 'unavailable_entity' else 1,
+        -(r.get('unavailable_for_seconds') or 0)
+        if r.get('category') == 'unavailable_entity' else 0,
+    ))
 
     return records
 
@@ -284,6 +384,7 @@ def _print_table(records, no_truncate):
         'stalled': 'Stalled devices (all entities unavailable)',
         'disabled': 'Disabled devices (user/integration disabled)',
         'restored_entity': 'Restored entities (integration no longer provides them)',
+        'unavailable_entity': 'Unavailable entities (>15min, on healthy domains)',
     }
 
     total = len(records)
@@ -322,10 +423,11 @@ def _print_json(records):
 
 
 CSV_FIELDS = [
-    'category', 'device_id', 'name', 'area', 'integration',
+    'category', 'device_id', 'device_name', 'name', 'area', 'integration',
     'manufacturer', 'model', 'sw_version', 'hw_version', 'via_device_id',
     'disabled_by', 'entities_enabled', 'entities_disabled', 'last_seen',
     'entity_id', 'platform', 'friendly_name',
+    'state', 'last_changed', 'unavailable_for_seconds',
 ]
 
 
@@ -338,7 +440,8 @@ def _print_csv(records):
     click.echo(buf.getvalue(), nl=False)
 
 
-def get_zombie_devices(format_type='table', category=None, no_truncate=False):
+def get_zombie_devices(format_type='table', category=None, no_truncate=False,
+                       ignore_label=None):
     """Triage entry point for `hactl get zombie-devices`."""
     HASS_URL, HASS_TOKEN = load_config()
 
@@ -348,7 +451,12 @@ def get_zombie_devices(format_type='table', category=None, no_truncate=False):
     if category and category not in CATEGORIES:
         raise click.ClickException(
             f"Unknown category: {category}. "
-            f"Choose one of: orphan, stalled, disabled, restored")
+            f"Choose one of: orphan, stalled, disabled, restored, "
+            f"unavailable_entity")
+
+    if ignore_label is None:
+        ignore_label = os.environ.get(
+            'HACTL_IGNORE_LABEL', DEFAULT_IGNORE_LABEL)
 
     data = _fetch_all(HASS_URL, HASS_TOKEN)
     if not data['ws_ok']:
@@ -357,10 +465,13 @@ def get_zombie_devices(format_type='table', category=None, no_truncate=False):
             'orphan/stalled/disabled categories will be empty.',
             fg='yellow', err=True)
 
+    now = datetime.now(timezone.utc)
     classified = classify_zombies(
-        data['devices'], data['entities'], data['states'])
+        data['devices'], data['entities'], data['states'],
+        ignore_label=ignore_label, now=now)
 
-    records = _build_records(data, classified, category_filter=category)
+    records = _build_records(
+        data, classified, category_filter=category, now=now)
 
     if format_type == 'json':
         _print_json(records)

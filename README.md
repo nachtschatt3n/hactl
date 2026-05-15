@@ -119,7 +119,7 @@ hactl get integrations               # Configured integrations
 hactl get automations                # All automations
 hactl get dashboards                 # All dashboards
 hactl get services                   # Available services
-hactl get zombie-devices             # Triage orphans / stalled / disabled / restored entities
+hactl get zombie-devices             # Triage orphans / stalled / disabled / restored / unavailable entities
 
 # And 20 more commands for scenes, scripts, helpers, calendars, etc.
 ```
@@ -155,6 +155,12 @@ hactl delete devices --filter category=orphan
 hactl delete entities --filter platform=tibber_prices
 hactl delete config-entries --filter state=not_loaded
 
+# Recommended safe pattern for HAGHS-parity zombie cleanup:
+# --state-only unavailable drops live entities BEFORE the safety
+# predicate ever sees them.
+hactl delete entities --filter platform=mobile_app \
+                      --state-only unavailable --dry-run
+
 # From a manifest (e.g. piped from zombie-devices)
 hactl get zombie-devices -o json --category orphan \
   | hactl delete -f - --dry-run
@@ -162,6 +168,10 @@ hactl get zombie-devices -o json --category orphan \
 # Common flags
 [--dry-run] [--yes] [--limit N] [--force] [--audit PATH] [--quiet]
 ```
+
+The live-state safety predicate refuses to delete an entity whose
+current state isn't `unavailable`/`unknown` (bulk: hard-refuse;
+singular: y/N prompt; `--force` bypasses).
 
 See [`docs/delete.md`](docs/delete.md) for the full SOP, safety
 predicate, and audit-log format.

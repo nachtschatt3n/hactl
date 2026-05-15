@@ -440,7 +440,7 @@ class TestGetZombieDevices:
         lines = [l for l in result.output.splitlines() if l]
         # Header + 1 row
         assert len(lines) == 2
-        assert lines[0].startswith('category,device_id,name')
+        assert lines[0].startswith('category,device_id,device_name,name')
         assert '"Has, Comma"' in lines[1]
 
     def test_category_filter_orphan(self, mock_env_vars, monkeypatch):

@@ -549,6 +549,29 @@ ZOMBIE_DEVICE_WARN_THRESHOLD = 25
 ZOMBIE_RESTORED_ENTITY_WARN_THRESHOLD = 50
 ZOMBIE_TOP_N = 5
 
+# Tiered thresholds for the new HAGHS-parity `unavailable_entity` bucket.
+# INFO < WARN_THRESHOLD <= WARN < CRIT_THRESHOLD <= CRIT.
+ZOMBIE_UNAVAILABLE_ENTITY_WARN_THRESHOLD = 10
+ZOMBIE_UNAVAILABLE_ENTITY_CRIT_THRESHOLD = 50
+
+# Domains we consider when looking for "individually unavailable" entities.
+# Mirrors the HAGHS algorithm — only entity domains that report a real
+# physical/observable signal. Excludes button/event/scene/etc whose
+# `unavailable` is normal between triggers.
+ZOMBIE_UNAVAILABLE_DOMAINS = frozenset([
+    'sensor', 'binary_sensor', 'switch', 'light', 'fan',
+    'climate', 'media_player', 'vacuum', 'camera',
+])
+
+# Grace period: an entity must be unavailable for at least this long before
+# it counts as a zombie. 15 min matches HAGHS and tolerates a normal HA
+# restart / brief integration reload.
+ZOMBIE_UNAVAILABLE_GRACE_SECONDS = 900
+
+# Default ignore label (HAGHS parity). Entity OR its parent device having
+# this label in the registry's `labels` list is skipped from zombie checks.
+DEFAULT_IGNORE_LABEL = 'haghs_ignore'
+
 
 def _fetch_registries(hass_url, hass_token):
     """Pull device + entity registry over websocket. Returns (devices, entities) or None on failure."""
@@ -569,27 +592,72 @@ def _fetch_registries(hass_url, hass_token):
     return devices, entities
 
 
-def classify_zombies(devices, entities, states):
+def _has_label(record, label):
+    """True if a registry record (entity or device) carries `label`."""
+    if not label or not record:
+        return False
+    labels = record.get('labels') or []
+    return label in labels
+
+
+def _parse_iso_ts(ts):
+    """Parse a Home-Assistant ISO timestamp into a tz-aware datetime.
+
+    Returns None on any error. HA emits both `Z`-suffixed and `+00:00`
+    forms depending on the endpoint.
+    """
+    if not ts:
+        return None
+    try:
+        return datetime.fromisoformat(str(ts).replace('Z', '+00:00'))
+    except (ValueError, TypeError):
+        return None
+
+
+def classify_zombies(devices, entities, states, ignore_label=None,
+                     now=None):
     """Pure classification of zombie devices and entities.
 
     Inputs:
-      - devices:  device-registry list (config/device_registry/list)
-      - entities: entity-registry list (config/entity_registry/list)
-      - states:   /api/states list (or None)
+      - devices:      device-registry list (config/device_registry/list)
+      - entities:     entity-registry list (config/entity_registry/list)
+      - states:       /api/states list (or None)
+      - ignore_label: optional str. Entity OR its parent device carrying
+                      this label in `labels` is skipped from every
+                      category. Defaults to DEFAULT_IGNORE_LABEL when
+                      None is passed and the env hasn't disabled it.
+      - now:          optional datetime override (testing).
 
     Returns a dict:
       {
-        'orphans':            [device, ...],   # no enabled entities at all
-        'stalled':            [device, ...],   # all enabled entities unavailable/unknown
-        'disabled':           [device, ...],   # device.disabled_by is set
-        'restored_entities':  [state, ...],    # state.attributes.restored == True
+        'orphans':              [device, ...],
+        'stalled':              [device, ...],
+        'disabled':             [device, ...],
+        'restored_entities':    [state, ...],
+        'unavailable_entities': [(state, entity_reg, device_reg), ...],
       }
 
     A device is classified into exactly one of orphans/stalled/disabled
-    (disabled wins, then orphan, then stalled). Restored entities are
-    independent — they may or may not link to a device.
+    (disabled wins, then orphan, then stalled). Restored entities and
+    unavailable_entities are independent — they may or may not link to
+    a device.
     """
+    if ignore_label is None:
+        ignore_label = DEFAULT_IGNORE_LABEL
+    if now is None:
+        now = datetime.now(timezone.utc)
+
     state_by_eid = {s.get('entity_id', ''): s for s in (states or [])}
+    device_by_id = {d.get('id'): d for d in (devices or []) if d.get('id')}
+    entity_by_eid = {e.get('entity_id'): e for e in (entities or [])
+                     if e.get('entity_id')}
+
+    def _entity_ignored(entity, device):
+        if _has_label(entity, ignore_label):
+            return True
+        if device and _has_label(device, ignore_label):
+            return True
+        return False
 
     enabled_entities_by_device = {}
     for e in (entities or []):
@@ -597,6 +665,8 @@ def classify_zombies(devices, entities, states):
         if not did:
             continue
         if e.get('disabled_by'):
+            continue
+        if _entity_ignored(e, device_by_id.get(did)):
             continue
         enabled_entities_by_device.setdefault(did, []).append(e)
 
@@ -607,6 +677,8 @@ def classify_zombies(devices, entities, states):
     for d in (devices or []):
         did = d.get('id')
         if not did:
+            continue
+        if _has_label(d, ignore_label):
             continue
         ents = enabled_entities_by_device.get(did, [])
 
@@ -634,14 +706,52 @@ def classify_zombies(devices, entities, states):
 
     restored_entities = []
     for s in (states or []):
-        if s.get('attributes', {}).get('restored'):
-            restored_entities.append(s)
+        if not s.get('attributes', {}).get('restored'):
+            continue
+        eid = s.get('entity_id') or ''
+        ent_reg = entity_by_eid.get(eid)
+        dev_reg = device_by_id.get((ent_reg or {}).get('device_id'))
+        if _entity_ignored(ent_reg or {}, dev_reg):
+            continue
+        restored_entities.append(s)
+
+    # New HAGHS-parity bucket: entities that are individually
+    # unavailable/unknown for >grace, on whitelisted domains.
+    unavailable_entities = []
+    for s in (states or []):
+        eid = s.get('entity_id') or ''
+        if not eid:
+            continue
+        domain = eid.split('.', 1)[0] if '.' in eid else ''
+        if domain not in ZOMBIE_UNAVAILABLE_DOMAINS:
+            continue
+        state_val = s.get('state')
+        if state_val not in ('unavailable', 'unknown'):
+            continue
+        # Self-reference skip — HAGHS publishes its own integration health
+        # entity which is naturally `unknown` until it computes its first
+        # score.
+        if 'integration_health' in eid:
+            continue
+        last_changed = _parse_iso_ts(
+            s.get('last_changed') or s.get('last_updated'))
+        if last_changed is None:
+            continue
+        age_seconds = (now - last_changed).total_seconds()
+        if age_seconds < ZOMBIE_UNAVAILABLE_GRACE_SECONDS:
+            continue
+        ent_reg = entity_by_eid.get(eid)
+        dev_reg = device_by_id.get((ent_reg or {}).get('device_id'))
+        if _entity_ignored(ent_reg or {}, dev_reg):
+            continue
+        unavailable_entities.append((s, ent_reg, dev_reg))
 
     return {
         'orphans': orphans,
         'stalled': stalled,
         'disabled': disabled_devs,
         'restored_entities': restored_entities,
+        'unavailable_entities': unavailable_entities,
     }
 
 
@@ -683,9 +793,11 @@ def check_zombie_devices(hass_url, hass_token, states):
     stalled = classified['stalled']
     disabled_devs = classified['disabled']
     restored_entities = classified['restored_entities']
+    unavailable_entities = classified['unavailable_entities']
 
     findings = []
-    total = len(orphans) + len(stalled) + len(disabled_devs) + len(restored_entities)
+    total = (len(orphans) + len(stalled) + len(disabled_devs)
+             + len(restored_entities) + len(unavailable_entities))
 
     def _device_label(d):
         name = d.get('name_by_user') or d.get('name') or '?'
@@ -746,13 +858,34 @@ def check_zombie_devices(hass_url, hass_token, states):
             findings.append(_finding('info',
                 f"  ... and {len(restored_entities) - ZOMBIE_TOP_N} more"))
 
+    # Unavailable entities — HAGHS-parity 5th bucket. Tiered severity:
+    # INFO < 10, WARN 10-49, CRIT >=50. Most installs land in INFO/WARN
+    # without action; CRIT means an integration cluster is misbehaving.
+    if unavailable_entities:
+        n = len(unavailable_entities)
+        if n >= ZOMBIE_UNAVAILABLE_ENTITY_CRIT_THRESHOLD:
+            sev = 'critical'
+        elif n >= ZOMBIE_UNAVAILABLE_ENTITY_WARN_THRESHOLD:
+            sev = 'warning'
+        else:
+            sev = 'info'
+        findings.append(_finding(sev,
+            f"Unavailable entities (>15min, on healthy domains): {n}"))
+        for tup in unavailable_entities[:ZOMBIE_TOP_N]:
+            s = tup[0]
+            findings.append(_finding('info', f"  {_entity_label(s)}"))
+        if n > ZOMBIE_TOP_N:
+            findings.append(_finding('info',
+                f"  ... and {n - ZOMBIE_TOP_N} more"))
+
     if not findings:
         findings.append(_finding('ok', 'No zombie devices or entities detected'))
     else:
         findings.append(_finding('info',
             f"Total zombie items: {total} ({len(orphans)} orphan + "
             f"{len(stalled)} stalled + {len(disabled_devs)} disabled + "
-            f"{len(restored_entities)} restored entities)"))
+            f"{len(restored_entities)} restored entities + "
+            f"{len(unavailable_entities)} unavailable entities)"))
 
     return _check_result('Zombie Devices', findings)
 
