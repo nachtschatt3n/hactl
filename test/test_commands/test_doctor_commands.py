@@ -39,8 +39,20 @@ def mock_error_log_response():
 
 
 @pytest.fixture
+def mock_config_entries_response():
+    """Mock /api/config/config_entries/entry response — all loaded by default."""
+    return [
+        {'entry_id': 'a1', 'domain': 'mqtt', 'title': 'MQTT', 'state': 'loaded',
+         'source': 'user', 'disabled_by': None, 'reason': None},
+        {'entry_id': 'a2', 'domain': 'zha', 'title': 'Zigbee', 'state': 'loaded',
+         'source': 'user', 'disabled_by': None, 'reason': None},
+    ]
+
+
+@pytest.fixture
 def mock_doctor_api(monkeypatch, mock_states_response, mock_config_response,
-                    mock_check_config_response, mock_error_log_response):
+                    mock_check_config_response, mock_error_log_response,
+                    mock_config_entries_response):
     """Mock all API calls needed by doctor command."""
     def mock_request(url, token, method='GET', data=None):
         if url.endswith('/api/'):
@@ -49,6 +61,8 @@ def mock_doctor_api(monkeypatch, mock_states_response, mock_config_response,
             return mock_states_response
         elif '/api/config/core/check_config' in url:
             return mock_check_config_response
+        elif '/api/config/config_entries/entry' in url:
+            return mock_config_entries_response
         elif '/api/error_log' in url:
             return mock_error_log_response
         elif '/api/config' in url:
@@ -60,8 +74,11 @@ def mock_doctor_api(monkeypatch, mock_states_response, mock_config_response,
 
 
 def _make_doctor_api(monkeypatch, states, mock_config_response,
-                     mock_check_config_response, mock_error_log_response):
+                     mock_check_config_response, mock_error_log_response,
+                     config_entries=None):
     """Helper to set up doctor API mocks with custom states."""
+    entries = config_entries if config_entries is not None else []
+
     def mock_request(url, token, method='GET', data=None):
         if url.endswith('/api/'):
             return {'message': 'API running.'}
@@ -69,6 +86,8 @@ def _make_doctor_api(monkeypatch, states, mock_config_response,
             return states
         elif '/api/config/core/check_config' in url:
             return mock_check_config_response
+        elif '/api/config/config_entries/entry' in url:
+            return entries
         elif '/api/error_log' in url:
             return mock_error_log_response
         elif '/api/config' in url:
@@ -173,12 +192,19 @@ class TestDoctorSingleCheck:
         assert result.exit_code == 0
         assert 'Version' in result.output
 
-    def test_check_integrations(self, mock_env_vars, mock_doctor_api):
+    def test_check_entity_availability(self, mock_env_vars, mock_doctor_api):
         runner = CliRunner()
-        result = runner.invoke(cli, ['doctor', '--check', 'integrations'])
+        result = runner.invoke(cli, ['doctor', '--check', 'entity_availability'])
 
         assert result.exit_code == 0
-        assert 'Integration Status' in result.output
+        assert 'Entity Availability by Domain' in result.output
+
+    def test_check_config_entries(self, mock_env_vars, mock_doctor_api):
+        runner = CliRunner()
+        result = runner.invoke(cli, ['doctor', '--check', 'config_entries'])
+
+        assert result.exit_code == 0
+        assert 'Integrations' in result.output
 
     def test_check_automations(self, mock_env_vars, mock_doctor_api):
         runner = CliRunner()
@@ -380,8 +406,8 @@ class TestDoctorUnavailableDetection:
         assert any('1 entities healthy' in f['message'] for f in findings)
 
 
-class TestDoctorIntegrationStatus:
-    """Test integration status check with smart filtering"""
+class TestDoctorEntityAvailability:
+    """Test entity-availability-by-domain check with smart filtering"""
 
     def test_expected_unknowns_excluded(self, mock_env_vars, monkeypatch,
                                         mock_config_response, mock_check_config_response,
@@ -399,7 +425,7 @@ class TestDoctorIntegrationStatus:
                          mock_check_config_response, mock_error_log_response)
 
         runner = CliRunner()
-        result = runner.invoke(cli, ['doctor', '--check', 'integrations', '--format', 'json'])
+        result = runner.invoke(cli, ['doctor', '--check', 'entity_availability', '--format', 'json'])
 
         assert result.exit_code == 0
         data = json.loads(result.output)
@@ -424,7 +450,7 @@ class TestDoctorIntegrationStatus:
                          mock_check_config_response, mock_error_log_response)
 
         runner = CliRunner()
-        result = runner.invoke(cli, ['doctor', '--check', 'integrations', '--format', 'json'])
+        result = runner.invoke(cli, ['doctor', '--check', 'entity_availability', '--format', 'json'])
 
         assert result.exit_code == 0
         data = json.loads(result.output)
@@ -433,6 +459,162 @@ class TestDoctorIntegrationStatus:
         assert len(warn_findings) == 1
         assert '1/3' in warn_findings[0]['message']
         assert '33%' in warn_findings[0]['message']
+
+
+class TestDoctorConfigEntries:
+    """Test config-entry (integration setup) check."""
+
+    def _entries_api(self, monkeypatch, entries, mock_config_response,
+                     mock_check_config_response, mock_error_log_response):
+        # No state-driven checks needed; provide an empty states list.
+        _make_doctor_api(monkeypatch, [], mock_config_response,
+                         mock_check_config_response, mock_error_log_response,
+                         config_entries=entries)
+
+    def test_all_loaded_no_findings(self, mock_env_vars, monkeypatch,
+                                    mock_config_response, mock_check_config_response,
+                                    mock_error_log_response):
+        entries = [
+            {'entry_id': '1', 'domain': 'mqtt', 'title': 'MQTT', 'state': 'loaded',
+             'source': 'user', 'disabled_by': None, 'reason': None},
+        ]
+        self._entries_api(monkeypatch, entries, mock_config_response,
+                          mock_check_config_response, mock_error_log_response)
+
+        runner = CliRunner()
+        result = runner.invoke(cli, ['doctor', '--check', 'config_entries', '--format', 'json'])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        findings = data['checks'][0]['findings']
+        assert all(f['status'] == 'ok' for f in findings)
+        assert any('1 integrations loaded' in f['message'] for f in findings)
+
+    def test_setup_error_is_critical(self, mock_env_vars, monkeypatch,
+                                     mock_config_response, mock_check_config_response,
+                                     mock_error_log_response):
+        entries = [
+            {'entry_id': '1', 'domain': 'smartthings', 'title': 'SmartThings',
+             'state': 'setup_error', 'source': 'user', 'disabled_by': None,
+             'reason': 'Token expired'},
+        ]
+        self._entries_api(monkeypatch, entries, mock_config_response,
+                          mock_check_config_response, mock_error_log_response)
+
+        runner = CliRunner()
+        result = runner.invoke(cli, ['doctor', '--check', 'config_entries', '--format', 'json'])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        findings = data['checks'][0]['findings']
+        crit = [f for f in findings if f['status'] == 'critical']
+        assert len(crit) == 1
+        assert 'smartthings' in crit[0]['message']
+        assert 'setup_error' in crit[0]['message']
+        assert 'Token expired' in crit[0]['message']
+
+    def test_setup_retry_is_warning(self, mock_env_vars, monkeypatch,
+                                    mock_config_response, mock_check_config_response,
+                                    mock_error_log_response):
+        entries = [
+            {'entry_id': '1', 'domain': 'music_assistant',
+             'title': 'Music Assistant', 'state': 'setup_retry',
+             'source': 'user', 'disabled_by': None,
+             'reason': 'Failed to connect to music assistant server `http://192.168.55.25`'},
+        ]
+        self._entries_api(monkeypatch, entries, mock_config_response,
+                          mock_check_config_response, mock_error_log_response)
+
+        runner = CliRunner()
+        result = runner.invoke(cli, ['doctor', '--check', 'config_entries', '--format', 'json'])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        findings = data['checks'][0]['findings']
+        warns = [f for f in findings if f['status'] == 'warning']
+        assert len(warns) == 1
+        assert 'music_assistant' in warns[0]['message']
+        assert 'setup_retry' in warns[0]['message']
+
+    def test_disabled_by_is_ignored(self, mock_env_vars, monkeypatch,
+                                    mock_config_response, mock_check_config_response,
+                                    mock_error_log_response):
+        entries = [
+            {'entry_id': '1', 'domain': 'flichub', 'title': 'flichub',
+             'state': 'not_loaded', 'source': 'user', 'disabled_by': 'user',
+             'reason': None},
+            {'entry_id': '2', 'domain': 'mqtt', 'title': 'MQTT',
+             'state': 'loaded', 'source': 'user', 'disabled_by': None,
+             'reason': None},
+        ]
+        self._entries_api(monkeypatch, entries, mock_config_response,
+                          mock_check_config_response, mock_error_log_response)
+
+        runner = CliRunner()
+        result = runner.invoke(cli, ['doctor', '--check', 'config_entries', '--format', 'json'])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        findings = data['checks'][0]['findings']
+        # No critical/warning findings for the user-disabled entry.
+        assert not any(f['status'] in ('critical', 'warning') for f in findings)
+
+    def test_source_ignore_is_ignored(self, mock_env_vars, monkeypatch,
+                                      mock_config_response, mock_check_config_response,
+                                      mock_error_log_response):
+        entries = [
+            {'entry_id': '1', 'domain': 'zha', 'title': 'SLZB-06P10',
+             'state': 'not_loaded', 'source': 'ignore', 'disabled_by': None,
+             'reason': None},
+            {'entry_id': '2', 'domain': 'xbox', 'title': 'xbox',
+             'state': 'not_loaded', 'source': 'ignore', 'disabled_by': None,
+             'reason': None},
+        ]
+        self._entries_api(monkeypatch, entries, mock_config_response,
+                          mock_check_config_response, mock_error_log_response)
+
+        runner = CliRunner()
+        result = runner.invoke(cli, ['doctor', '--check', 'config_entries', '--format', 'json'])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        findings = data['checks'][0]['findings']
+        assert not any(f['status'] in ('critical', 'warning') for f in findings)
+
+    def test_reason_passthrough(self, mock_env_vars, monkeypatch,
+                                mock_config_response, mock_check_config_response,
+                                mock_error_log_response):
+        """Reason field should appear in output verbatim after em-dash."""
+        reason = 'Failed to connect to music assistant server `http://192.168.55.25`'
+        entries = [
+            {'entry_id': '1', 'domain': 'music_assistant',
+             'title': 'Music Assistant Home', 'state': 'setup_retry',
+             'source': 'user', 'disabled_by': None, 'reason': reason},
+        ]
+        self._entries_api(monkeypatch, entries, mock_config_response,
+                          mock_check_config_response, mock_error_log_response)
+
+        runner = CliRunner()
+        result = runner.invoke(cli, ['doctor', '--check', 'config_entries', '--format', 'json'])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        findings = data['checks'][0]['findings']
+        msgs = [f['message'] for f in findings]
+        assert any(reason in m for m in msgs)
+        assert any('—' in m for m in msgs)
+
+    def test_migration_error_is_critical(self, mock_env_vars, monkeypatch,
+                                         mock_config_response, mock_check_config_response,
+                                         mock_error_log_response):
+        entries = [
+            {'entry_id': '1', 'domain': 'foo', 'title': 'Foo',
+             'state': 'migration_error', 'source': 'user', 'disabled_by': None,
+             'reason': None},
+        ]
+        self._entries_api(monkeypatch, entries, mock_config_response,
+                          mock_check_config_response, mock_error_log_response)
+
+        runner = CliRunner()
+        result = runner.invoke(cli, ['doctor', '--check', 'config_entries', '--format', 'json'])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        findings = data['checks'][0]['findings']
+        assert any(f['status'] == 'critical' for f in findings)
 
 
 class TestDoctorBatteryDetection:

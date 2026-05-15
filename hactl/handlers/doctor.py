@@ -413,12 +413,17 @@ def check_version(hass_url, hass_token):
         }
 
 
-def check_integrations(states):
+def check_entity_availability_by_domain(states):
     """Group truly unavailable entities by integration domain.
 
     Uses _classify_entity to exclude all INFO categories (expected unknowns,
     mobile devices, appliances, Echo/Alexa, UniFi, solar, AirPlay, cameras).
     Only counts entities classified as 'truly_unavailable'.
+
+    NOTE: This is the entity-level rollup. It will NOT surface a failed
+    integration setup (e.g. setup_retry, setup_error) because such an
+    integration produces no entities to count. Use check_config_entries()
+    for integration-level failures.
     """
     domain_unavail = {}
     domain_totals = {}
@@ -455,7 +460,84 @@ def check_integrations(states):
     if not findings:
         findings.append(_finding('ok', 'No integration issues detected'))
 
-    return _check_result('Integration Status', findings)
+    return _check_result('Entity Availability by Domain', findings)
+
+
+# Severity mapping for config-entry states.
+# CRIT: integration is broken and won't recover without intervention.
+# WARN: integration is in a transient or user-suppressed-not-loaded state.
+_CONFIG_ENTRY_CRIT_STATES = frozenset(['setup_error', 'failed_unload', 'migration_error'])
+_CONFIG_ENTRY_WARN_STATES = frozenset(['setup_retry', 'setup_in_progress', 'not_loaded'])
+
+
+def check_config_entries(hass_url, hass_token):
+    """Check Home Assistant config entries (integrations) for failed setup states.
+
+    Uses the REST endpoint /api/config/config_entries/entry, which (since
+    HA 2024.x) includes `reason`, `disabled_by`, and `source` fields.
+    Entries with `disabled_by` set or `source == "ignore"` are user-suppressed
+    and ignored. Remaining non-`loaded` entries are mapped to severities
+    via _CONFIG_ENTRY_CRIT_STATES / _CONFIG_ENTRY_WARN_STATES.
+    """
+    try:
+        entries = make_api_request(
+            f"{hass_url}/api/config/config_entries/entry", hass_token)
+    except click.ClickException as e:
+        return _check_result('Integrations', [
+            _finding('warning', f"Could not fetch config entries: {e.format_message()}")
+        ])
+    except Exception as e:
+        return _check_result('Integrations', [
+            _finding('warning', f"Could not fetch config entries: {e}")
+        ])
+
+    if not isinstance(entries, list):
+        return _check_result('Integrations', [
+            _finding('warning', 'Unexpected config_entries response shape')
+        ])
+
+    findings = []
+    loaded = 0
+    suppressed = 0
+
+    for entry in entries:
+        state = entry.get('state', 'unknown')
+        if state == 'loaded':
+            loaded += 1
+            continue
+
+        # Suppress user-disabled or user-ignored entries (discovery noise).
+        if entry.get('disabled_by') or entry.get('source') == 'ignore':
+            suppressed += 1
+            continue
+
+        domain = entry.get('domain', 'unknown')
+        title = entry.get('title', '?') or '?'
+        reason = entry.get('reason')
+
+        if state in _CONFIG_ENTRY_CRIT_STATES:
+            severity = 'critical'
+        elif state in _CONFIG_ENTRY_WARN_STATES:
+            severity = 'warning'
+        else:
+            # Unknown non-loaded state — treat as warning, surface verbatim.
+            severity = 'warning'
+
+        msg = f"{domain} ({title}): {state}"
+        if reason:
+            msg += f" — {reason}"
+        findings.append(_finding(severity, msg))
+
+    if not findings:
+        summary = f"{loaded} integrations loaded"
+        if suppressed:
+            summary += f", {suppressed} user-suppressed"
+        findings.append(_finding('ok', summary))
+    else:
+        findings.append(_finding('info',
+            f"{loaded} loaded, {suppressed} user-suppressed"))
+
+    return _check_result('Integrations', findings)
 
 
 def check_automations(states):
@@ -512,7 +594,8 @@ SEVERITY_LABELS = {
 
 ALL_CHECKS = [
     'api', 'unavailable', 'batteries', 'error_log', 'config',
-    'stale', 'version', 'integrations', 'automations',
+    'stale', 'version', 'config_entries', 'entity_availability',
+    'automations',
 ]
 
 
@@ -528,7 +611,7 @@ def run_doctor(format_type='table', check_name=None):
 
     # Fetch states once if needed by any check
     states = None
-    needs_states = {'unavailable', 'batteries', 'stale', 'integrations', 'automations'}
+    needs_states = {'unavailable', 'batteries', 'stale', 'entity_availability', 'automations'}
     if needs_states & set(checks_to_run):
         try:
             states = make_api_request(f"{HASS_URL}/api/states", HASS_TOKEN)
@@ -559,8 +642,10 @@ def run_doctor(format_type='table', check_name=None):
         elif name == 'version':
             version_info = check_version(HASS_URL, HASS_TOKEN)
             results.append(version_info['check'])
-        elif name == 'integrations':
-            results.append(check_integrations(states))
+        elif name == 'config_entries':
+            results.append(check_config_entries(HASS_URL, HASS_TOKEN))
+        elif name == 'entity_availability':
+            results.append(check_entity_availability_by_domain(states))
         elif name == 'automations':
             results.append(check_automations(states))
 
