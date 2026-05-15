@@ -90,6 +90,22 @@ For a restored entity that's *not* device-bound: **Developer Tools →
 States → click the entity → red trash icon**. Or wait — HA purges
 restored entities after 10 days.
 
+**Or pipe straight into `hactl delete`** (kubectl-style, dry-run by
+default):
+
+```bash
+# Manual review of the plan first.
+hactl get zombie-devices -o json --category orphan \
+  | hactl delete -f - --dry-run
+
+# Commit (audit log written automatically).
+hactl get zombie-devices -o json --category orphan \
+  | hactl delete -f - --yes --limit 200
+```
+
+See [`docs/delete.md`](delete.md) for the full deletion SOP, the
+safety predicate, and the audit-log shape.
+
 **4. Re-scan and confirm:**
 
 ```bash
@@ -120,10 +136,8 @@ intentional (disabled, stable) or part of the next cluster.
 ## What this command WON'T do
 
 - It will **not** delete or modify any device, entity, integration, or
-  state. Strictly read-only.
-- It does **not** wrap a destructive `hactl delete device` — no such
-  command exists in `hactl`, by design. Removing devices in bulk
-  without a UI confirmation gate is too easy to get wrong.
+  state. Strictly read-only — `hactl delete` is the destructive sibling
+  (see [`docs/delete.md`](delete.md)).
 - It does **not** detect ZHA-internal "stale" devices that show up only
   in the ZHA panel — those need ZHA's own UI.
 

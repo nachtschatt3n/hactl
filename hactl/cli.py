@@ -51,10 +51,11 @@ def cli(ctx, verbose, quiet):
 
 
 # Register command groups
-from hactl.commands import get_group, update_group, battery_group, k8s_group, memory_group, doctor_command, generate_group, pull_group
+from hactl.commands import get_group, update_group, delete_group, battery_group, k8s_group, memory_group, doctor_command, generate_group, pull_group
 
 cli.add_command(get_group)
 cli.add_command(update_group)
+cli.add_command(delete_group)
 cli.add_command(battery_group)
 cli.add_command(k8s_group)
 cli.add_command(memory_group)

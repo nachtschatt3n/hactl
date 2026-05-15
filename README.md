@@ -139,6 +139,33 @@ hactl update dashboard <url_path> --from <yaml_file> --create
 hactl update helper <yaml_file>
 ```
 
+### DELETE - Remove Resources (kubectl-style)
+
+Generic deletion for `device`, `entity`, and `config-entry`. Default is
+dry-run unless `--yes`. Every real run writes a JSON audit log.
+
+```bash
+# Singular by id
+hactl delete device <id-or-name>
+hactl delete entity <entity_id>
+hactl delete config-entry <entry_id>
+
+# Bulk by filter
+hactl delete devices --filter category=orphan
+hactl delete entities --filter platform=tibber_prices
+hactl delete config-entries --filter state=not_loaded
+
+# From a manifest (e.g. piped from zombie-devices)
+hactl get zombie-devices -o json --category orphan \
+  | hactl delete -f - --dry-run
+
+# Common flags
+[--dry-run] [--yes] [--limit N] [--force] [--audit PATH] [--quiet]
+```
+
+See [`docs/delete.md`](docs/delete.md) for the full SOP, safety
+predicate, and audit-log format.
+
 ### BATTERY - Monitoring Utilities (3 commands)
 
 ```bash
