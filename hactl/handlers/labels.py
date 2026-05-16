@@ -207,12 +207,15 @@ def ensure_label(ws: WebSocketClient, data: dict, label_id: str,
             {'label_id': label_id, 'name': label_id})
         return True, None
     try:
-        ws.call('config/label_registry/create',
-                name=label_id, label_id=label_id)
+        # HA's config/label_registry/create accepts `name` only — the
+        # label_id is auto-derived (lowercase snake_case). Passing
+        # label_id explicitly returns `extra keys not allowed`.
+        created = ws.call('config/label_registry/create', name=label_id)
+        new_id = (created or {}).get('label_id', label_id)
         # Refresh local cache so subsequent calls in the same run
         # don't try to recreate.
         data.setdefault('labels', []).append(
-            {'label_id': label_id, 'name': label_id})
+            {'label_id': new_id, 'name': label_id})
         return True, None
     except Exception as e:
         return False, str(e)
