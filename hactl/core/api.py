@@ -26,7 +26,17 @@ def make_api_request(url: str, token: str, method: str = 'GET',
     Raises:
         click.ClickException: If the API request fails
     """
-    req = urllib.request.Request(url)
+    # Serialize the body only when a payload was actually provided. The
+    # check must be `is not None` (not truthiness): an empty dict is a
+    # valid payload (e.g. POST /api/services/automation/reload with {})
+    # and must be sent as b'{}', not silently dropped.
+    body = None
+    if data is not None and method in ('POST', 'PUT', 'PATCH'):
+        body = json.dumps(data).encode('utf-8')
+
+    # Pass method explicitly so it never depends on body presence —
+    # previously a body-less POST degraded to GET and HA returned 405.
+    req = urllib.request.Request(url, data=body, method=method)
     req.add_header('Authorization', f'Bearer {token}')
     req.add_header('Content-Type', 'application/json')
     # Browser-shaped UA: Cloudflare's WAF returns 1010 on the default
@@ -35,10 +45,6 @@ def make_api_request(url: str, token: str, method: str = 'GET',
     req.add_header('User-Agent', 'Mozilla/5.0 (hactl)')
 
     try:
-        if data and method in ('POST', 'PUT', 'PATCH'):
-            req.data = json.dumps(data).encode('utf-8')
-            req.get_method = lambda: method
-
         with urllib.request.urlopen(req) as response:
             return json.loads(response.read().decode())
     except urllib.error.HTTPError as e:
