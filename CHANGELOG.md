@@ -5,6 +5,37 @@ All notable changes to hactl will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- `hactl update dashboard <path> --create` only ever called `lovelace/config/save`,
+  which fails with `config_not_found` for a genuinely new dashboard because no
+  panel exists at that url path yet. Creating a dashboard in Home Assistant takes
+  two calls, and doing only the second one was a silent half-job: the command
+  could not create a dashboard at all. `create_dashboard()` now registers the
+  panel via `lovelace/dashboards/create` first, then saves the config.
+  - Idempotent: re-running `--create` against an existing dashboard updates its
+    config and leaves the panel registration (title, icon, sidebar, admin flags)
+    completely untouched.
+  - Atomic: if registration succeeds but the config save fails, the freshly
+    registered panel is removed again, so a failed create cannot strand an empty
+    dashboard in the sidebar. A pre-existing panel is never deleted.
+  - New url paths are validated for the hyphen Home Assistant requires, with a
+    clear message instead of a raw WebSocket error. The rule is only applied to
+    panels being created, so pushing config to an existing hyphen-less dashboard
+    (e.g. `map`) still works.
+- `hactl update dashboard` against a dashboard that does not exist now fails with
+  a message naming the `--create` flag, instead of a raw `config_not_found` dump.
+
+### Added
+
+- `hactl update dashboard --title/--icon/--no-sidebar/--require-admin` to control
+  how a **new** dashboard is registered in the sidebar. Ignored when the
+  dashboard already exists, so they can never overwrite an existing registration.
+- `hactl update delete-dashboard <url_path> --yes` removes a dashboard's panel
+  registration and its config — the cleanup half of the create path.
+
 ## [1.1.1] - 2026-05-10
 
 ### Fixed

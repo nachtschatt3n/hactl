@@ -159,7 +159,7 @@ def _backup_and_check_drift(ws, url_path: str, new_config, yaml_file: str,
     """
     live_config = _fetch_live_config(ws, url_path)
     if live_config is None:
-        return
+        return None
 
     backup_path = _write_backup(url_path, live_config)
     click.echo(f"backup: {backup_path}")
@@ -176,6 +176,40 @@ def _backup_and_check_drift(ws, url_path: str, new_config, yaml_file: str,
         ]
         raise click.ClickException("\n".join(lines))
 
+    return live_config
+
+
+def _find_dashboard(ws: WebSocketClient, url_path: str):
+    """Return the panel-registry entry for ``url_path``, or None if unregistered.
+
+    A dashboard is two separate things in Home Assistant: a *panel registration*
+    (what puts it in the sidebar) and a *lovelace config* (its contents). This
+    inspects the former.
+    """
+    entries = ws.call("lovelace/dashboards/list") or []
+    for entry in entries:
+        if entry.get("url_path") == url_path:
+            return entry
+    return None
+
+
+def _default_title(url_path: str, config) -> str:
+    """Title for a new panel: the config's own title, else a prettified url_path."""
+    if isinstance(config, dict):
+        title = config.get("title")
+        if title:
+            return str(title)
+    return url_path.replace("-", " ").replace("_", " ").strip().title() or url_path
+
+
+def _validate_new_url_path(url_path: str) -> None:
+    """Home Assistant rejects a storage dashboard whose url_path has no hyphen."""
+    if "-" not in url_path:
+        raise click.ClickException(
+            f"invalid dashboard url_path '{url_path}': Home Assistant requires the "
+            "url path of a new dashboard to contain a hyphen (e.g. 'my-dashboard')."
+        )
+
 
 def update_dashboard(url_path, yaml_file, force: bool = False):
     """Update an existing dashboard, with backup + drift detection."""
@@ -185,21 +219,40 @@ def update_dashboard(url_path, yaml_file, force: bool = False):
     ws = WebSocketClient(HASS_URL, HASS_TOKEN)
     try:
         ws.connect()
-        _backup_and_check_drift(
+        live_config = _backup_and_check_drift(
             ws, url_path, new_config, yaml_file, force,
             f"error: live dashboard '{url_path}' has diverged from {yaml_file}.",
         )
+        if live_config is None and _find_dashboard(ws, url_path) is None:
+            raise click.ClickException(
+                f"dashboard '{url_path}' does not exist yet.\n"
+                f"to create it: hactl update dashboard {url_path} "
+                f"--from {yaml_file} --create"
+            )
         ws.call("lovelace/config/save", url_path=url_path, config=new_config)
         click.secho(f"✓ Successfully updated dashboard: {url_path}", fg='green')
     finally:
         ws.close()
 
 
-def create_dashboard(url_path, yaml_file, force: bool = False):
-    """Create a new dashboard.
+def create_dashboard(url_path, yaml_file, force: bool = False, title=None,
+                     icon=None, show_in_sidebar: bool = True,
+                     require_admin: bool = False):
+    """Create a new dashboard: register the panel, then save its config.
 
-    If a dashboard already exists at ``url_path`` we treat it like an update:
-    take a backup and apply drift detection unless ``force`` is set.
+    Creating a dashboard takes two API calls, and doing only the second one is
+    a silent half-job: ``lovelace/config/save`` fails with ``config_not_found``
+    unless a panel is already registered at ``url_path``. So we register via
+    ``lovelace/dashboards/create`` first, then save the config.
+
+    Idempotent. If a panel is already registered at ``url_path`` its
+    registration is left completely untouched -- title, icon, sidebar and admin
+    flags are never clobbered -- and this behaves exactly like an update:
+    backup + drift detection, then save.
+
+    If registering succeeds but saving the config fails, the freshly registered
+    panel is removed again so a failed create cannot leave an empty dashboard
+    stranded in the sidebar.
     """
     HASS_URL, HASS_TOKEN = load_config()
     new_config = load_yaml_file(yaml_file)
@@ -207,12 +260,63 @@ def create_dashboard(url_path, yaml_file, force: bool = False):
     ws = WebSocketClient(HASS_URL, HASS_TOKEN)
     try:
         ws.connect()
+
+        # Safe to run first: a no-op when no config exists yet, and it aborts
+        # before we mutate anything if an existing dashboard has drifted.
         _backup_and_check_drift(
             ws, url_path, new_config, yaml_file, force,
             f"error: dashboard '{url_path}' already exists and has diverged from {yaml_file}.",
         )
-        ws.call("lovelace/config/save", url_path=url_path, config=new_config)
+
+        created_id = None
+        if _find_dashboard(ws, url_path) is None:
+            _validate_new_url_path(url_path)
+            create_kwargs = {
+                "url_path": url_path,
+                "title": title or _default_title(url_path, new_config),
+                "show_in_sidebar": show_in_sidebar,
+                "require_admin": require_admin,
+                "mode": "storage",
+            }
+            if icon:
+                create_kwargs["icon"] = icon
+            result = ws.call("lovelace/dashboards/create", **create_kwargs)
+            created_id = (result or {}).get("id")
+            click.echo(f"registered panel: {url_path} (title={create_kwargs['title']})")
+        else:
+            click.echo(f"panel already registered: {url_path} (registration left unchanged)")
+
+        try:
+            ws.call("lovelace/config/save", url_path=url_path, config=new_config)
+        except Exception:
+            if created_id:
+                try:
+                    ws.call("lovelace/dashboards/delete", dashboard_id=created_id)
+                    click.secho(
+                        f"rolled back panel registration for '{url_path}'", fg='yellow')
+                except Exception:
+                    click.secho(
+                        f"warning: could not roll back panel registration for "
+                        f"'{url_path}' (id={created_id}); remove it in the HA UI.",
+                        fg='yellow')
+            raise
+
         click.secho(f"✓ Successfully created dashboard: {url_path}", fg='green')
+    finally:
+        ws.close()
+
+
+def delete_dashboard(url_path: str) -> None:
+    """Remove a dashboard's panel registration (and with it, its config)."""
+    HASS_URL, HASS_TOKEN = load_config()
+    ws = WebSocketClient(HASS_URL, HASS_TOKEN)
+    try:
+        ws.connect()
+        entry = _find_dashboard(ws, url_path)
+        if entry is None:
+            raise click.ClickException(f"dashboard '{url_path}' is not registered")
+        ws.call("lovelace/dashboards/delete", dashboard_id=entry.get("id"))
+        click.secho(f"✓ Deleted dashboard: {url_path}", fg='green')
     finally:
         ws.close()
 
