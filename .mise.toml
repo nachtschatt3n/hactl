@@ -21,7 +21,7 @@ run = "pytest test/ --tb=short"
 
 [tasks.lint]
 description = "Check Python syntax"
-run = "python -m py_compile get/*.py update/*.py"
+run = "python -m compileall -q hactl/"
 
 [tasks.setup]
 description = "Complete project setup"
